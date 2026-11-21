@@ -1,0 +1,22 @@
+[project]
+name = "drift-gameplay-editor"
+version = "0.1.0"
+description = "CLI helpers for CutWire Drift gameplay editing (YouTube 16:9 & vertical 9:16 Reels/Shorts)"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "faster-whisper>=1.0",
+    "numpy>=1.26,<2.1",
+    "setuptools>=65,<81",
+    "tensorflow>=2.15,<2.19",
+    "tensorflow-hub>=0.16",
+    "tf-keras>=2.15,<2.19",
+]
+
+[project.scripts]
+drift-gameplay-cli = "drift_gameplay_cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

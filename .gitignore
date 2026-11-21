@@ -1,0 +1,23 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Local media, audio caches, and generated editing outputs
+*.f32
+*.wav
+*.mp3
+*.mp4
+*.mkv
+outputs/
+scratch/
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
