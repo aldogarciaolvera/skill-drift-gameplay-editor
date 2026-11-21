@@ -323,9 +323,12 @@ class DriftGameplayCliTests(unittest.TestCase):
             credits_txt = (out_dir / "youtube_credits.txt").read_text(encoding="utf-8")
             self.assertIn("Night Drive by Walen", credits_txt)
             self.assertTrue((out_dir / "chapters.txt").exists())
-            self.assertTrue((out_dir / "edit_report.md").exists())
+            edit_rep = (out_dir / "edit_report.md").read_text(encoding="utf-8")
+            self.assertIn("Ficha Técnica", edit_rep)
+            self.assertIn("Cold Open", edit_rep)
 
     def test_robust_z_mad_detects_spike(self) -> None:
+        self.assertEqual(cli.format_hms_timestamp(3665), "01:01:05")
         series = [-40.0] * 30 + [-10.0, -8.0] + [-40.0] * 30
         z = cli.robust_z_mad(series, window=30)
         self.assertEqual(len(z), len(series))
@@ -383,9 +386,15 @@ class DriftGameplayCliTests(unittest.TestCase):
             self.assertEqual(rc_h, 0)
             h_doc = json.loads(hpath.read_text(encoding="utf-8"))
             self.assertGreaterEqual(h_doc["count"], 5)
-            self.assertTrue(Path(h_doc["summary_md"]).exists())
+            md_txt = Path(h_doc["summary_md"]).read_text(encoding="utf-8")
+            self.assertIn("] - [", md_txt)
+            self.assertIn("Hook (0-3 s) -> Setup -> Climax", md_txt)
+            self.assertIn("-> Payoff", md_txt)
             for h in h_doc["highlights"]:
                 self.assertGreaterEqual(h["duration"], 60.0)
+                self.assertIn("in_hms", h)
+                self.assertIn("out_hms", h)
+                self.assertIn("hook_0_3s", h)
                 self.assertEqual(len(h["zoom_cues"]), 1)
                 self.assertEqual(h["zoom_cues"][0]["kind"], "entry")
                 self.assertEqual(len(h["sfx_cues"]), 1)
@@ -430,6 +439,28 @@ class DriftGameplayCliTests(unittest.TestCase):
             self.assertEqual(rc_s1, 0)
             cues_tr = json.loads((subs_dir / "cues_for_translation.json").read_text(encoding="utf-8"))
             self.assertGreater(len(cues_tr), 5)
+            self.assertTrue(all(len(c["text_en"]) <= 24 or " " not in c["text_en"] for c in cues_tr))
+
+            subs_narrow = tdp / "subs_narrow"
+            rc_sn = cli.main(
+                [
+                    "build-reel-subs",
+                    "--transcript-file",
+                    str(tpath),
+                    "--ranges-file",
+                    str(hpath),
+                    "--words-per-cue",
+                    "3",
+                    "--max-chars-per-cue",
+                    "8",
+                    "--out-dir",
+                    str(subs_narrow),
+                ]
+            )
+            self.assertEqual(rc_sn, 0)
+            cues_narrow = json.loads((subs_narrow / "cues_for_translation.json").read_text(encoding="utf-8"))
+            self.assertGreater(len(cues_narrow), len(cues_tr))
+            self.assertTrue(all(len(c["text_en"]) <= 8 or " " not in c["text_en"] for c in cues_narrow))
 
             translated = [{"index": c["index"], "text_es": f"ES: {c['text_en']}"} for c in cues_tr]
             tr_es_path = tdp / "translated.json"
@@ -533,6 +564,7 @@ class DriftGameplayCliTests(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 doc = json.loads(out_path.read_text(encoding="utf-8"))
                 self.assertTrue(doc["ok"])
+                self.assertTrue(doc["safe_zone_ok"])
                 self.assertEqual(doc["track_count"], 2)
                 self.assertEqual(doc["tracks"][0]["lang"], "es")
                 self.assertFalse(doc["tracks"][0]["hidden"])

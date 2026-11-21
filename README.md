@@ -11,12 +11,12 @@ Soporta dos modos de edición:
    - Descarga o reutiliza música *Free To Use* de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y rellena los espacios muteados **y tramos de conducción sin radio** (con auto-ducking `duck_under` debajo de diálogos).
    - Marca casos dudosos con `add_bookmark` y genera `youtube_credits.txt`, `chapters.txt` y `edit_report.md`.
 
-2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, `> 60 s`):**
-   - Pensado para editar clips verticales limpios desde gameplay ya editado o crudo.
+2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, `60–90 s` o `30–60 s`):**
+   - Pensado para editar clips verticales limpios desde gameplay ya editado o crudo (o generar primero una hoja editorial completa desde transcripción).
    - Cambia el lienzo a `1080×1920`, elige el encuadre vertical (`solo_juego` con fondo desenfocado sin barras negras, `facecam` arriba/juego abajo, o `a_camara` vía `auto_reframe`).
-   - Analiza audio (`z` robusta mediana/MAD), actividad, escenas y transcripción (`find-highlights`) generando `highlights.md` para curación humana y extracción de al menos **5 clips narrativos de `60–90 s`** con clímax hacia ~65–70 % del clip.
-   - Mantiene la edición limpia (sin spam de efectos ni sacudidas en mitad del diálogo): aplica **únicamente un acento/whoosh sutil de entrada al inicio de cada Reel** y normaliza cerca de `−14 LUFS`.
-   - Genera e importa **dos pistas independientes de subtítulos** (`Subtitles EN` y `Subtitles ES`), ocultando una para exportar fácilmente ambas versiones.
+   - Analiza audio (`z` robusta mediana/MAD), actividad, escenas y transcripción (`find-highlights`) generando `highlights.md` (`[HH:MM:SS] - [HH:MM:SS]`, Hook 0–3 s, Planteamiento → Nudo → Desenlace) para curación humana y extracción de al menos **5 clips narrativos de `60–90 s`** (o `3–5` de `30–60 s`) con clímax hacia ~65–70 % del clip.
+   - Mantiene la edición limpia (sin spam de efectos ni sacudidas en mitad del diálogo): aplica **únicamente un acento/whoosh sutil de entrada al inicio de cada Reel**, respeta **Safe Zones estrictas** (`≥20 %` inferior y `≥15 %` derecha) y normaliza cerca de `−14 LUFS`.
+   - Genera e importa **dos pistas independientes de subtítulos nativos karaoke palabra a palabra** (`Subtitles ES` y `Subtitles EN` con jerga gamer natural), ocultando una para exportar fácilmente ambas versiones.
 
 ---
 

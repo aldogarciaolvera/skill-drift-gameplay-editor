@@ -208,6 +208,14 @@ def format_youtube_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{sec:02d}"
 
 
+def format_hms_timestamp(seconds: float) -> str:
+    """Format seconds strictly as HH:MM:SS for editorial In/Out clip matrices."""
+    total_sec = max(0, int(round(seconds)))
+    hours, rem = divmod(total_sec, 3600)
+    minutes, sec = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+
+
 def norm_path_key(path: str) -> str:
     """Normalize filesystem paths for cross-OS asset matching."""
     return os.path.normcase(os.path.normpath(path.replace("\\", "/")))
@@ -1729,17 +1737,26 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
         credits_lines.append("- (No external Free To Use tracks placed yet.)")
     write_text(out_dir / "youtube_credits.txt", "\n".join(credits_lines) + "\n")
 
-    chapter_lines = ["00:00 Intro / Start"]
+    chapter_lines = ["00:00 Intro / Cold Open (0:00-0:15 Teaser -> Match Start)"]
     for idx, clip in enumerate(vclips[1:], start=1):
         t_start = float(clip.get("start", 0.0))
         if t_start >= 15.0:
-            chapter_lines.append(f"{format_youtube_timestamp(t_start)} Part {idx + 1} ({clip.get('name', 'Segment')})")
+            chapter_lines.append(
+                f"{format_youtube_timestamp(t_start)} Chapter {idx + 1} - [SEO/CTR Event Title] ({clip.get('name', 'Segment')})"
+            )
     write_text(out_dir / "chapters.txt", "\n".join(chapter_lines) + "\n")
 
+    total_tl_dur = sum(float(c.get("duration", 0.0)) for c in vclips)
     report = [
         "# CutWire Drift — YouTube Edit Report",
         "",
-        f"- **Timeline clips inspected:** {len(vclips)}",
+        "## Ficha Técnica",
+        f"- **Timeline clips inspected:** {len(vclips)} ({format_hms_timestamp(total_tl_dur)} total)",
+        "- **Creator tone / Game notes:** (fill game title & creator tone before final delivery)",
+        "- **Cold Open (00:00 - 00:15):** Optional teaser of the session's best non-spoiler peak (keep graphic violence out of first 7s).",
+        "- **Pacing note:** Apply clean jump cuts on slow traversal stretches without dialogue; avoid flashy mid-clip effect spam.",
+        "",
+        "## Edit Summary",
         f"- **Time-jump transitions planned:** {len(time_jump_cuts)} (`{args.transition_kind}`, `{args.transition_dur}s`)",
         f"- **Copyright music mute windows:** {len(muted_summary)} ({sum(m['dur'] for m in muted_summary):.1f}s total)",
         f"- **Free To Use fill clips planned:** {len(music_fill_segments)}",
@@ -1769,9 +1786,10 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
 
 HYPE_PATTERN = re.compile(
     r"(!|\?|(?:j[aeiou]){2,}|"
-    r"\b(oh my god|omg|no way|what|wait|bro|dude|holy|clutch|nice|lets go|let's go|"
-    r"haha|lmao|wtf|careful|watch out|run|cuidado|corre|qué|no manches|vamos|ay|ala|ostia|"
-    r"hostia|ostras|dios|no puede ser|no me lo creo|madre mía|increíble|épico|jaja|jajaja|jsjs|ajaj)\b)",
+    r"\b(oh my god|omg|no way|what|wait|bro|dude|holy|clutch|headshot|nice|win|dead|rip|gg|rush|"
+    r"lets go|let's go|haha|lmao|wtf|careful|watch out|run|rushear|nerf|nerfeo|loot|spot|"
+    r"cuidado|corre|qué|no manches|vamos|ay|ala|ostia|hostia|ostras|dios|no puede ser|"
+    r"no me lo creo|madre mía|increíble|épico|jaja|jajaja|jsjs|ajaj)\b)",
     re.IGNORECASE,
 )
 
@@ -2098,18 +2116,25 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
             zoom_cues.sort(key=lambda z: z["rel_time"])
             sfx_cues.sort(key=lambda z: z["rel_time"])
 
+        hook_preview = (
+            " ".join(s.get("text", "").strip() for s in sub_segs if float(s["start"]) <= sa + 4.5)[:120].strip()
+            or preview[:120]
+        )
         highlights.append(
             {
                 "id": f"reel_{idx}",
                 "rank": idx,
                 "start": sa,
                 "end": sb,
+                "in_hms": format_hms_timestamp(sa),
+                "out_hms": format_hms_timestamp(sb),
                 "duration": round(sb - sa, 3),
                 "peak_abs_time": sel.get("peak_sec"),
                 "peak_pct": round((float(sel.get("peak_sec", sa)) - sa) / max(1.0, sb - sa), 2),
                 "score": sel["score"],
                 "reasons": reasons,
                 "bookmark_label": f"Reel #{idx} ({round(sb - sa, 1)}s)",
+                "hook_0_3s": hook_preview,
                 "transcript_preview": preview,
                 "zoom_cues": zoom_cues,
                 "sfx_cues": sfx_cues,
@@ -2117,8 +2142,9 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
         )
         md_lines.extend(
             [
-                f"## Reel #{idx} | `{format_youtube_timestamp(sa)}–{format_youtube_timestamp(sb)}` ({sb - sa:.1f}s) | score={sel['score']} | {', '.join(reasons) or 'speech'}",
-                f"- Source seconds: `{sa} .. {sb}` | Climax at `{int(highlights[-1]['peak_pct'] * 100)}%`",
+                f"## Reel #{idx} | `[{format_hms_timestamp(sa)}] - [{format_hms_timestamp(sb)}]` ({sb - sa:.1f}s) | score={sel['score']} | {', '.join(reasons) or 'speech'}",
+                f"- Source seconds: `{sa} .. {sb}` | Narrative check: Hook (0-3 s) -> Setup -> Climax (~`{int(highlights[-1]['peak_pct'] * 100)}%`) -> Payoff | Framing: `solo_juego` / `facecam` / `a_camara`",
+                f"- Opening Hook (0-3 s): {hook_preview or '(visual hook)'}",
                 f"- Transcript: {full_text or '(no speech detected)'}",
                 "",
             ]
@@ -2261,8 +2287,9 @@ def _group_words_into_cues(
     words_per_cue: int,
     max_cue_sec: float,
     min_cue_sec: float,
+    max_chars: int = 24,
 ) -> list[dict[str, Any]]:
-    """Group mapped words into punchy 1-3 word karaoke-friendly cues with zero overlaps."""
+    """Group mapped words into punchy 1-3 word karaoke-friendly cues respecting 9:16 Safe Zones."""
     cues: list[dict[str, Any]] = []
     buf: list[dict[str, Any]] = []
 
@@ -2288,7 +2315,9 @@ def _group_words_into_cues(
             gap = w["tl_start"] - buf[-1]["tl_end"]
             span = w["tl_end"] - buf[0]["tl_start"]
             same_reel = w["reel_id"] == buf[0]["reel_id"]
-            if not same_reel or len(buf) >= words_per_cue or gap > 0.35 or span > max_cue_sec:
+            cand_chars = sum(len(x["word"]) for x in buf) + len(buf) + len(w["word"])
+            over_chars = max_chars > 0 and cand_chars > max_chars
+            if not same_reel or len(buf) >= words_per_cue or gap > 0.35 or span > max_cue_sec or over_chars:
                 _flush()
         buf.append(w)
         if re.search(r"[.,;:!?…]$", w["word"]):
@@ -2537,6 +2566,7 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
         words_per_cue=args.words_per_cue,
         max_cue_sec=args.max_cue_sec,
         min_cue_sec=args.min_cue_sec,
+        max_chars=int(getattr(args, "max_chars_per_cue", 24)),
     )
 
     translation_sheet = [
@@ -2704,6 +2734,15 @@ def cmd_apply_reel_subs(args: argparse.Namespace) -> int:
         if en_reels:
             tracks_by_lang.append(("en", en_reels, False))
 
+    pos_y = float(args.pos_y)
+    safe_zone_ok = 230.0 <= pos_y <= 1520.0
+    if not safe_zone_ok:
+        print(
+            f"[warn] pos_y={pos_y} falls outside 9:16 Safe Zone [230..1520] (bottom 20% UI starts at 1536px).",
+            file=sys.stderr,
+            flush=True,
+        )
+
     style_cfg: dict[str, Any] = {
         "fontFamily": args.font,
         "pixelSize": int(args.pixel_size),
@@ -2712,6 +2751,7 @@ def cmd_apply_reel_subs(args: argparse.Namespace) -> int:
         "align": "center",
         "valign": "center",
         "boxEnabled": False,
+        "wordWrap": True,
         "accent": {
             "rule": "karaoke",
             "color": args.accent_color,
@@ -2726,7 +2766,8 @@ def cmd_apply_reel_subs(args: argparse.Namespace) -> int:
             "dry_run": True,
             "preset": args.preset,
             "style": style_cfg,
-            "pos_y": args.pos_y,
+            "pos_y": pos_y,
+            "safe_zone_ok": safe_zone_ok,
             "tracks_order": [{"lang": lang, "clips": len(rs), "hidden": hid} for lang, rs, hid in reversed(tracks_by_lang)],
         }
         if args.output:
@@ -2775,7 +2816,8 @@ def cmd_apply_reel_subs(args: argparse.Namespace) -> int:
     result = {
         "ok": True,
         "preset": args.preset,
-        "pos_y": float(args.pos_y),
+        "pos_y": pos_y,
+        "safe_zone_ok": safe_zone_ok,
         "tracks": [{"track": i, **entry} for i, entry in enumerate(reversed(applied_tracks))],
         "track_count": n_tracks,
     }
@@ -2903,6 +2945,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_br.add_argument("--corrected-script", help="Optional JSON mapping reel_id -> clean text for word-timestamp alignment")
     p_br.add_argument("--translated-json", help="JSON with Spanish translations (and optional cleaned text_en)")
     p_br.add_argument("--words-per-cue", type=int, default=3)
+    p_br.add_argument("--max-chars-per-cue", type=int, default=24, help="Max characters per cue to keep clear of right 15%% UI margin (0=disable)")
     p_br.add_argument("--max-cue-sec", type=float, default=1.6)
     p_br.add_argument("--min-cue-sec", type=float, default=0.25)
     p_br.add_argument("--out-dir", required=True, help="Output directory for .srt and reel_clips_*.json files")

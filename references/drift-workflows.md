@@ -133,6 +133,11 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
     ```
     (Pass `over_clips: [...]` if dialogue spans multiple audio lanes.)
 
+### 2.7 Cold Open Teaser, Jump-Cut Pacing & SEO/CTR Chapters
+- **Optional Cold Open (`0:00–0:15`):** Place a short teaser of the session's highest-tension non-spoiler moment right at `0:00` (avoiding graphic blood/violence in the opening `7 s`), followed by a brief `dip`/`crossfade` into the main match.
+- **Jump-Cut Pacing on Slow Stretches:** When footage has low-action traversal or quiet exploration without strong highlights, mark/cut dead pauses with clean jump cuts (keeping dialogue intact) rather than adding flashy effects.
+- **SEO & CTR Chapters (`chapters.txt`):** Replace generic `"Part N"` titles with concise, clickable event-based titles (`MM:SS` or `H:MM:SS`) reflecting real game missions, fights, or twists from the transcript.
+
 ---
 
 ## 3. Mode B — Vertical Reels / Shorts / TikTok (`9:16`, `> 60 s`) Recipes
@@ -149,11 +154,11 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
    - **`a_camara` — Speaker Vertical Crop (talking-head / reaction full frame):**
      - Use `detect_faces` + `auto_reframe` (`crop` to `9:16` following the face).
 
-### 3.2 Highlight Extraction (`>= 5` Narrative Clips, `60–90 s`)
+### 3.2 Highlight Extraction (`>= 5` Clips `60–90 s`, or `3–5` Micro-Clips `30–60 s`)
 1. Run Drift `activity` and `detect_scenes` (`list_scenes` for shot boundaries/scores).
 2. Run `drift_gameplay_cli.py transcribe --full --model small --device auto --vad-filter` (with 16 kHz `.f32`/PCM audio via `ffmpeg`) to capture accurate word-level timestamps across the full source.
-3. Run `drift_gameplay_cli.py find-highlights --audio-f32 ./out/audio_full.f32 --min-dur 60 --max-dur 90 --min-count 5` combining robust Median/MAD audio energy z-scores, transcript hype/laughter density, `activity`, and `scenes`, placing peaks near `~65–70 %` of each window.
-4. **Curate via `highlights.md`:** Read every candidate's full preview before cutting. Drop silent stretches or repeated ambient/radio lines; ensure each selected Reel opens directly on an engaging line/visual hook (avoid graphic violence/blood in the first `7 s` and avoid unmuted copyright radio), ends on a natural payoff sentence, and stays strictly `>= 60 s`.
+3. Run `drift_gameplay_cli.py find-highlights --audio-f32 ./out/audio_full.f32 --min-dur 60 --max-dur 90 --min-count 5` (or `--min-dur 30 --max-dur 60 --min-count 3 --max-count 5` when the user wants short TikTok micro-clips), combining robust Median/MAD audio energy z-scores, transcript hype/laughter/gaming cues, `activity`, and `scenes`, placing peaks near `~65–70 %` of each window.
+4. **Curate via `highlights.md`:** Read every candidate's full preview before cutting. Verify exact `[HH:MM:SS] - [HH:MM:SS]` In/Out boundaries and confirm each clip delivers: **Hook (`0–3 s`) -> Setup -> Rising Tension / Climax -> Payoff or Cliffhanger**. Drop silent stretches or repeated ambient/radio lines; avoid graphic violence/blood in the first `7 s` and avoid unmuted copyright radio.
 5. Slice and separate the selected highlights cleanly on the timeline (`2.0 s` gaps optional) with one `add_bookmark` per Reel `#1..#N` (`Reel #N (XXs) - <Topic>`).
 
 ### 3.3 Clean Editing Discipline & Subtle Reel-Entry Accent Only
@@ -166,12 +171,18 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
 - **Internal sub-cuts (only if a Reel stitches two moments):** Clean cut or brief `crossfade` (`0.20–0.25 s`, no flashy swirl/shake effects).
 - **Audio loudness target:** Verify/normalize foreground dialogue/gameplay near `~ −14 LUFS` (`TP <= −1.5 dBTP`) via `audio_measure` / `normalize_volume` after arranging clips.
 
-### 3.4 Dual EN/ES Native Karaoke Subtitles (`apply-reel-subs` Option C)
-1. Run `build-reel-subs` (first pass without `--translated-json`) to generate `cues_for_translation.json`, `reel_clips_en.json`, and `reels_en.srt` (`1–3` words per cue, breaking cleanly on `[.,;:!?…]` or pauses `> 0.35 s`, matched per Reel via `--inspect-file`). Pass `--corrected-script` to align cleaned transcript lines onto Whisper word timings if needed.
-2. Read `cues_for_translation.json`, fix any Whisper misspellings (optional `"text_en"` cleanup), and translate naturally into gamer Spanish (`translated_cues.json`, preserving cue indices).
+### 3.4 Dual EN/ES Native Karaoke Subtitles & Strict 9:16 Safe Zones (`apply-reel-subs` Option C)
+> **Strict 9:16 Safe Zone Box (`1080×1920`):**
+> - **Top `12 %` (`y <= 230`):** Reserved for search bar / Follow / platform header.
+> - **Bottom `20 %` (`y >= 1536`):** Reserved for TikTok/Reels captions, audio ticker, and handle.
+> - **Right `15 %` (`x >= 918`):** Reserved for Like, Comment, Save, and Share icons — enforce short line lengths (`--max-chars-per-cue 24`) centered at `x = 540` so lines never approach `x = 918`.
+> - **Recommended subtitle anchor:** `positionX: 540`, `positionY: 1435` (`230 <= y <= 1520`), cleanly below the centered 16:9 gameplay box (and below any burned-in game subtitles) while staying clear of all HUD overlays.
+
+1. Run `build-reel-subs` (first pass without `--translated-json`) to generate `cues_for_translation.json`, `reel_clips_en.json`, and `reels_en.srt` (`1–3` words and `<= 24` chars per cue, breaking cleanly on `[.,;:!?…]` or pauses `> 0.35 s`, matched per Reel via `--inspect-file`). Pass `--corrected-script` to align cleaned transcript lines onto Whisper word timings if needed.
+2. Read `cues_for_translation.json`, fix any Whisper misspellings (optional `"text_en"` cleanup), and translate into **natural gamer Spanish** (`translated_cues.json`, preserving cue indices and keeping natural gaming slang such as `clutch`, `headshot`, `rushear`, `nerfeo`, `loot`, `spot`).
 3. Run `build-reel-subs` (second pass with `--translated-json translated_cues.json`) to emit synchronized `reel_clips_en.json`, `reel_clips_es.json`, `reels_en.srt`, `reels_es.srt`, and `reel_subs_manifest.json`.
 4. Run `drift_gameplay_cli.py apply-reel-subs --manifest ./out/subs/reel_subs_manifest.json --primary-lang es --output ./out/subs/apply_subs_result.json`, which executes Drift's native Option C pipeline cleanly with `dry_run: true` before every `atomic: true` batch:
    - Staging-creates **one independent subtitle clip per Reel** via `add_subtitle_clip` (`staging >= dur + 30`), trims each clip to its Reel duration (`set_trim({in: 0, out: reel_dur})`), moves it into exact timeline position (`move_clip({at: reel_start})`), and populates only that Reel's cues converted to **clip-local `[0..reel_dur]` seconds** (`set_subtitle_cues`, required by Drift's player even when `clip.start > 0`).
    - Prepends a second subtitle track (`add_track({type: "subtitle"})`) so `ES` (Track 0, `hidden: false`) and `EN` (Track 1, `hidden: true`) stay completely isolated without colliding.
-   - Applies Drift's verified word-by-word yellow karaoke style (`apply_text_preset("karaoke-pop")` + `set_text`: `fontFamily: "Anton"`, `pixelSize: 64`, `letterSpacing: 2`, `textCase: "upper"`, `align: "center"`, `valign: "center"`, `boxEnabled: false`, `accent: {rule: "karaoke", color: "#ffffd400", colorEnabled: true, sizeScale: 1.0}`) and centers in the safe zone (`set_transform({positionX: 540, positionY: 1435})`, cleanly below the FG gameplay frame and well above the bottom 20 % `y >= 1536` TikTok/Reels HUD).
-5. Visually verify both tracks via `capture` (checking multiple cue midpoints to confirm yellow word-by-word highlighting tracks live without letter crowding or UI overlap).
+   - Applies Drift's verified word-by-word yellow karaoke style (`apply_text_preset("karaoke-pop")` + `set_text`: `fontFamily: "Anton"`, `pixelSize: 64`, `letterSpacing: 2`, `textCase: "upper"`, `align: "center"`, `valign: "center"`, `boxEnabled: false`, `accent: {rule: "karaoke", color: "#ffffd400", colorEnabled: true, sizeScale: 1.0}`) and centers in the safe zone (`set_transform({positionX: 540, positionY: 1435})`).
+5. Visually verify both tracks via `capture` (checking multiple cue midpoints across Reels to confirm yellow word-by-word highlighting tracks live with zero right-margin or bottom-20% UI overlap).
