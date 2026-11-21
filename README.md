@@ -168,20 +168,6 @@ uv run --no-project python -m unittest discover -s tests -v
 
 ---
 
-## Publicar en GitHub
-
-```powershell
-cd C:\Users\Wall2\OneDrive\Documents\Proyectos\Skills\drift-gameplay-editor
-git init
-git add .
-git commit -m "feat: add drift-gameplay-editor skill and CLI"
-git branch -M main
-git remote add origin https://github.com/<tu-usuario>/drift-gameplay-editor.git
-git push -u origin main
-```
-
----
-
 ## Notas sobre Cuotas y Licencias
 
 - **Drift Marketplace:** La skill utiliza únicamente `stock.music` (proveedor *Free To Use*, sin límite diario) y `sfx` (sin límite diario), evitando `stock.audio` y `stock.video`.
