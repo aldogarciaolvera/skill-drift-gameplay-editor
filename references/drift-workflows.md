@@ -137,32 +137,41 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
 
 ## 3. Mode B — Vertical Reels / Shorts / TikTok (`9:16`, `> 60 s`) Recipes
 
-> **Always check schemas first:** Run `toolbox` on `project`, `subtitles`, `text`, `scene`, and `auto_reframe` / `set_track` / `add_bookmark` on the active Drift build before building `apply` batches.
+> **Always check schemas first:** Run `toolbox` on `project`, `subtitles`, `text`, `scene`, and `auto_reframe` / `detect_faces` / `set_track` / `add_bookmark` on the active Drift build before building `apply` batches.
 
 ### 3.1 Canvas Setup & Vertical 9:16 Framing (`1080×1920`)
-1. Switch canvas to `1080×1920` via `set_project_setup`.
-2. Two clean vertical framing strategies (pick based on gameplay HUD/action layout and confirm with `capture`):
-   - **Blurred Full-Frame Stack (default for UI-rich 16:9 games):**
-     - Background video lane: scale up to fill height (`1920 / 1080 = 1.778`, e.g. `scaleX: 1.78, scaleY: 1.78`) + add `builtin.effects.gaussian_blur` (or `stylize.blur`) and lower `opacity` slightly (`~0.75`) over dark background (`set_background`).
-     - Foreground gameplay lane (above background): center-fit or gentle crop (`scaleX: 0.5625..0.85` depending on safe HUD visibility, `positionX: 540, positionY: 960`), or enable `detect_faces` + `auto_reframe` when a facecam/character focus exists.
-   - **Action Punch-In Framing:** Scale `1.2–1.6` centered on key gameplay action (`positionX`/`positionY`), keyframed dynamically if HUD elements shift.
+1. Switch canvas to `1080×1920` via `set_project_setup` and inspect representative frames with `capture` + `detect_faces` before choosing the vertical framing mode:
+   - **`solo_juego` — Blurred Full-Frame Stack (default for pure gameplay / cutscenes):**
+     - Background video lane: scale to fill full `1920 px` vertical height (`scale 1.78` for clean 16:9, or **`scale ~4.5`** if 21:9 cutscenes contain baked black letterbox bars so no dark bars repeat top/bottom) + `builtin.effects.gaussian_blur` (`u_blurRadius: ~40`), `opacity: ~0.72`, **`volume: 0.0`** over dark background (`set_background({kind: "color", color: "#ff0b0b12"})`).
+     - Foreground gameplay lane (above background): center-fit (`scaleX: 1.15..1.20, scaleY: 1.15..1.20`, `positionX: 540, positionY: 960`). On `1080×1920`, a `1920×1080` clip at `scale: 1.0` renders at `1080×607.5 px` (fit-width), so `scale: 1.18` fills `~717 px` centered vertically, leaving crisp blurred headroom and lower caption space.
+   - **`facecam` — Streamer Cam + Gameplay Split (when `detect_faces` / `frames` shows a fixed corner camera):**
+     - Crop/position the corner facecam cleanly across the upper third (`1080×640`) and the gameplay across the lower two-thirds (`1080×1280`), horizontally offset away from the facecam corner so the camera never duplicates inside the gameplay box. Save the camera crop layout per streamer channel.
+   - **`a_camara` — Speaker Vertical Crop (talking-head / reaction full frame):**
+     - Use `detect_faces` + `auto_reframe` (`crop` to `9:16` following the face).
 
-### 3.2 Highlight Extraction (`>= 5` Clips, `60–90 s`)
+### 3.2 Highlight Extraction (`>= 5` Narrative Clips, `60–90 s`)
 1. Run Drift `activity` and `detect_scenes` (`list_scenes` for shot boundaries/scores).
-2. Run `drift_gameplay_cli.py transcribe --full` to capture word-level timestamps across the entire edited gameplay.
-3. Run `drift_gameplay_cli.py find-highlights --min-dur 60 --min-count 5` combining transcript excitement, `activity`, and `scenes`.
-4. Slice and separate the selected highlights cleanly on the timeline (leaving a small visual separator gap or placing one `add_bookmark` per Reel `#1..#5+` so the user can export each range via `set_work_area` or `export_video`).
+2. Run `drift_gameplay_cli.py transcribe --full --model small --device auto --vad-filter` (with 16 kHz `.f32`/PCM audio via `ffmpeg`) to capture accurate word-level timestamps across the full source.
+3. Run `drift_gameplay_cli.py find-highlights --audio-f32 ./out/audio_full.f32 --min-dur 60 --max-dur 90 --min-count 5` combining robust Median/MAD audio energy z-scores, transcript hype/laughter density, `activity`, and `scenes`, placing peaks near `~65–70 %` of each window.
+4. **Curate via `highlights.md`:** Read every candidate's full preview before cutting. Drop silent stretches or repeated ambient/radio lines; ensure each selected Reel opens directly on an engaging line/visual hook (avoid graphic violence/blood in the first `7 s` and avoid unmuted copyright radio), ends on a natural payoff sentence, and stays strictly `>= 60 s`.
+5. Slice and separate the selected highlights cleanly on the timeline (`2.0 s` gaps optional) with one `add_bookmark` per Reel `#1..#N` (`Reel #N (XXs) - <Topic>`).
 
-### 3.3 Dynamic Zooms, Effects & SFX
-- **Keyframed zoom punch-ins:** On `zoom_cues` emitted by `find-highlights`, animate `scaleX` and `scaleY` with `set_keyframes({"clip": ..., "interpolation": "smooth", "keys": {"scaleX": ..., "scaleY": ...}})` (e.g. `base -> base * 1.12 -> base` over `0.6–1.2 s`), or add `zoom_pulse` / subtle `camera_shake` / `camera_punch` effects at intense moments.
-- **Transitions:** Use dynamic transitions on sub-cuts (`radial_zoom_blur`, `simple_zoom`, `cross_zoom_swirl`, or `crossfade`, `0.20–0.30 s`) from `list_transitions`.
-- **SFX (`quota: null`):** Search `sfx` marketplace (`motion/whoosh`, `motion/impact`, `ui/pop`) and place short hits synced to zoom punch-ins and transitions on a dedicated `SFX` audio lane (`volume ~0.40–0.60`).
+### 3.3 Clean Editing Discipline & Subtle Reel-Entry Accent Only
+> **Editorial Focus:** Keep the body of every Reel distraction-free. Do **not** spam `camera_shake`, `camera_punch`, mid-clip `zoom_pulse`, or impact hits across dialogue.
 
-### 3.4 Dual EN/ES Viral Subtitles (`Subtitles EN` & `Subtitles ES`)
-1. Run `build-reel-subs` (first pass without `--translated-json`) to generate `reels_en.srt` and `cues_for_translation.json` (`2–4` words per punchy cue, zero overlaps, matched to final Reels timeline coordinates via `--inspect-file` or `--timeline-mode`).
-2. Translate `cues_for_translation.json` directly into natural gamer Spanish (`translated_cues.json`, preserving punchiness and cue indices).
-3. Run `build-reel-subs` (second pass with `--translated-json translated_cues.json`) to emit synchronized `reels_en.srt` and `reels_es.srt`.
-4. Import both `.srt` files as two separate subtitle tracks via `import_subtitle_file` (`Subtitles EN` and `Subtitles ES`).
-5. Discover available text styles/animations via `list_text_presets`, `list_text_looks`, and `list_text_animations`, style a cue using `apply_text_preset` / `set_text` / `set_text_animation`, and copy across the track with `apply_text_style_to_all`.
-6. Hide one subtitle track (`set_track({"track": <es_or_en_idx>, "hidden": true})`) so the user can export one language cleanly and toggle tracks to export the other.
-7. Call `capture` on at least two representative Reel frames (one English visible, one Spanish visible) to confirm safe 9:16 margins (keep captions away from bottom 20% TikTok/Reels UI overlay).
+- **Boundary micro-fades:** Apply clean `equalPower` micro-fades on foreground clips (`set_fade({in: 0.10..0.15, out: 0.15..0.20})`, `set_fade_curve({curve: "equalPower"})`) to eliminate audio/visual snaps.
+- **Entry accent only (`0.0–0.85 s` of each Reel):**
+  - Gentle `set_keyframes` settle on `scaleX` / `scaleY` (`interpolation: "smooth"`) right at the Reel's start — e.g. from `[tl_start, base * 1.06]` smoothly to `[tl_start + 0.85, base]` (or `[tl_start, base]` -> `[tl_start + 0.35, base * 1.05]` -> `[tl_start + 0.85, base]`), with no further zoom keyframes later in the Reel.
+  - Optional subtle zero-quota `whoosh` (`stock` `sfx` with `quota: null`, e.g. trimmed `0.45–0.75 s`) placed once at `tl_start` on a dedicated bottom `SFX` audio lane (`volume: 0.35–0.40`, `set_fade` `in: 0.02, out: 0.08`, `equalPower`).
+- **Internal sub-cuts (only if a Reel stitches two moments):** Clean cut or brief `crossfade` (`0.20–0.25 s`, no flashy swirl/shake effects).
+- **Audio loudness target:** Verify/normalize foreground dialogue/gameplay near `~ −14 LUFS` (`TP <= −1.5 dBTP`) via `audio_measure` / `normalize_volume` after arranging clips.
+
+### 3.4 Dual EN/ES Native Karaoke Subtitles (`apply-reel-subs` Option C)
+1. Run `build-reel-subs` (first pass without `--translated-json`) to generate `cues_for_translation.json`, `reel_clips_en.json`, and `reels_en.srt` (`1–3` words per cue, breaking cleanly on `[.,;:!?…]` or pauses `> 0.35 s`, matched per Reel via `--inspect-file`). Pass `--corrected-script` to align cleaned transcript lines onto Whisper word timings if needed.
+2. Read `cues_for_translation.json`, fix any Whisper misspellings (optional `"text_en"` cleanup), and translate naturally into gamer Spanish (`translated_cues.json`, preserving cue indices).
+3. Run `build-reel-subs` (second pass with `--translated-json translated_cues.json`) to emit synchronized `reel_clips_en.json`, `reel_clips_es.json`, `reels_en.srt`, `reels_es.srt`, and `reel_subs_manifest.json`.
+4. Run `drift_gameplay_cli.py apply-reel-subs --manifest ./out/subs/reel_subs_manifest.json --primary-lang es --output ./out/subs/apply_subs_result.json`, which executes Drift's native Option C pipeline cleanly with `dry_run: true` before every `atomic: true` batch:
+   - Staging-creates **one independent subtitle clip per Reel** via `add_subtitle_clip` (`staging >= dur + 30`), trims each clip to its Reel duration (`set_trim({in: 0, out: reel_dur})`), moves it into exact timeline position (`move_clip({at: reel_start})`), and populates only that Reel's cues converted to **clip-local `[0..reel_dur]` seconds** (`set_subtitle_cues`, required by Drift's player even when `clip.start > 0`).
+   - Prepends a second subtitle track (`add_track({type: "subtitle"})`) so `ES` (Track 0, `hidden: false`) and `EN` (Track 1, `hidden: true`) stay completely isolated without colliding.
+   - Applies Drift's verified word-by-word yellow karaoke style (`apply_text_preset("karaoke-pop")` + `set_text`: `fontFamily: "Anton"`, `pixelSize: 64`, `letterSpacing: 2`, `textCase: "upper"`, `align: "center"`, `valign: "center"`, `boxEnabled: false`, `accent: {rule: "karaoke", color: "#ffffd400", colorEnabled: true, sizeScale: 1.0}`) and centers in the safe zone (`set_transform({positionX: 540, positionY: 1435})`, cleanly below the FG gameplay frame and well above the bottom 20 % `y >= 1536` TikTok/Reels HUD).
+5. Visually verify both tracks via `capture` (checking multiple cue midpoints to confirm yellow word-by-word highlighting tracks live without letter crowding or UI overlap).

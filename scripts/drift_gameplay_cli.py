@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import difflib
 import http.client
 import json
 import math
@@ -33,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -303,10 +305,92 @@ def _parse_mcp_body(raw: bytes, content_type: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+def _post_mcp_tool(
+    url: str,
+    token: str,
+    tool: str,
+    tool_args: Any,
+    timeout: int = 1800,
+    img_dir: Path | None = None,
+) -> tuple[Any, list[str], bool]:
+    """Execute one Drift /mcp JSON-RPC tool call and decode text + image blocks."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": tool_args},
+    }
+    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            ctype = resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return {"ok": False, "error": f"http_{exc.code}", "detail": detail}, [], False
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
+        return {"ok": False, "error": "connection_failed", "detail": str(exc)}, [], False
+
+    rpc = _parse_mcp_body(raw, ctype)
+    if "error" in rpc and rpc["error"] is not None:
+        return {"ok": False, "error": "jsonrpc_error", "rpc_error": rpc["error"]}, [], False
+
+    res_obj = rpc.get("result", {})
+    sc = res_obj.get("structuredContent")
+    content = res_obj.get("content", [])
+    text_blocks: list[Any] = []
+    saved_images: list[str] = []
+
+    for idx, block in enumerate(content):
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text", "")
+            try:
+                text_blocks.append(json.loads(txt))
+            except json.JSONDecodeError:
+                text_blocks.append(txt)
+        elif btype == "image" and img_dir is not None:
+            mime = block.get("mimeType", "image/jpeg")
+            ext = "png" if "png" in mime.lower() else "jpg"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            img_path = img_dir / f"{tool}_{idx}.{ext}"
+            img_path.write_bytes(base64.b64decode(block.get("data", "")))
+            saved_images.append(str(img_path))
+
+    if sc is not None and not saved_images:
+        final_obj: Any = sc
+    elif len(text_blocks) == 1 and isinstance(text_blocks[0], dict) and not saved_images:
+        final_obj = text_blocks[0]
+    elif len(text_blocks) == 1 and isinstance(text_blocks[0], dict) and saved_images:
+        final_obj = dict(text_blocks[0])
+        final_obj["saved_images"] = saved_images
+    else:
+        final_obj = {
+            "ok": True,
+            "tool": tool,
+            "text_blocks": text_blocks,
+            "saved_images": saved_images,
+        }
+    ok_flag = final_obj.get("ok", True) if isinstance(final_obj, dict) else True
+    return final_obj, saved_images, (ok_flag is not False)
+
+
+def _resolve_mcp_credentials(args: argparse.Namespace) -> tuple[str, str]:
+    url = getattr(args, "url", None) or os.environ.get("DRIFT_MCP_URL", "")
+    token = getattr(args, "token", None) or os.environ.get("DRIFT_MCP_TOKEN", "")
+    return str(url).strip(), str(token).strip()
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     """Invoke a CutWire Drift /mcp JSON-RPC tool and save response to --output."""
-    url = args.url or os.environ.get("DRIFT_MCP_URL", "")
-    token = args.token or os.environ.get("DRIFT_MCP_TOKEN", "")
+    url, token = _resolve_mcp_credentials(args)
     if not url or not token:
         err = {
             "ok": False,
@@ -322,82 +406,19 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     else:
         tool_args = json.loads(args.args_json or "{}")
 
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": args.tool, "arguments": tool_args},
-    }
-    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
-    req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
-
-    try:
-        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-            raw = resp.read()
-            ctype = resp.headers.get("Content-Type", "")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        out_err = {"ok": False, "error": f"http_{exc.code}", "detail": detail}
-        write_json(args.output, out_err)
-        print(f"[mcp] HTTP {exc.code} -> {args.output}", file=sys.stderr)
-        return 1
-    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
-        out_err = {"ok": False, "error": "connection_failed", "detail": str(exc)}
-        write_json(args.output, out_err)
-        print(f"[mcp] CONNECTION FAILED ({exc}) -> {args.output}", file=sys.stderr)
-        return 1
-
-    rpc = _parse_mcp_body(raw, ctype)
-    if "error" in rpc and rpc["error"] is not None:
-        out_err = {"ok": False, "error": "jsonrpc_error", "rpc_error": rpc["error"]}
-        write_json(args.output, out_err)
-        print(f"[mcp] JSON-RPC ERROR -> {args.output}", file=sys.stderr)
-        return 1
-
-    content = rpc.get("result", {}).get("content", [])
-    text_blocks: list[Any] = []
-    saved_images: list[str] = []
     img_dir = (
         Path(args.save_images_dir)
         if args.save_images_dir
         else Path(args.output).parent / f"{Path(args.output).stem}_images"
     )
-
-    for idx, block in enumerate(content):
-        btype = block.get("type")
-        if btype == "text":
-            txt = block.get("text", "")
-            try:
-                text_blocks.append(json.loads(txt))
-            except json.JSONDecodeError:
-                text_blocks.append(txt)
-        elif btype == "image":
-            mime = block.get("mimeType", "image/jpeg")
-            ext = "png" if "png" in mime.lower() else "jpg"
-            img_dir.mkdir(parents=True, exist_ok=True)
-            img_path = img_dir / f"{args.tool}_{idx}.{ext}"
-            img_path.write_bytes(base64.b64decode(block.get("data", "")))
-            saved_images.append(str(img_path))
-
-    if len(text_blocks) == 1 and isinstance(text_blocks[0], dict) and not saved_images:
-        final_obj: Any = text_blocks[0]
-    elif len(text_blocks) == 1 and isinstance(text_blocks[0], dict) and saved_images:
-        final_obj = dict(text_blocks[0])
-        final_obj["saved_images"] = saved_images
-    else:
-        final_obj = {
-            "ok": True,
-            "tool": args.tool,
-            "text_blocks": text_blocks,
-            "saved_images": saved_images,
-        }
-
+    final_obj, saved_images, is_ok = _post_mcp_tool(
+        url, token, args.tool, tool_args, timeout=args.timeout, img_dir=img_dir
+    )
     write_json(args.output, final_obj)
+    err_kind = final_obj.get("error") if isinstance(final_obj, dict) else None
+    if not is_ok and err_kind in ("connection_failed", "jsonrpc_error") or (isinstance(err_kind, str) and err_kind.startswith("http_")):
+        print(f"[mcp] ERROR {err_kind} -> {args.output}", file=sys.stderr)
+        return 1
     ok_flag = final_obj.get("ok", True) if isinstance(final_obj, dict) else True
     print(f"[mcp] tool={args.tool} ok={ok_flag} images={len(saved_images)} -> {args.output}")
     return 0 if ok_flag is not False else 1
@@ -1035,10 +1056,58 @@ def _load_windows(windows_file: str | Path) -> list[dict[str, Any]]:
     return windows
 
 
+def _prepare_cuda_dlls() -> None:
+    """Register PyTorch / NVIDIA CUDA runtime DLL directories on Windows if installed."""
+    if sys.platform != "win32" or getattr(_prepare_cuda_dlls, "_done", False):
+        return
+    _prepare_cuda_dlls._done = True  # type: ignore[attr-defined]
+    import importlib.util
+
+    for pkg in ("torch", "nvidia.cublas", "nvidia.cudnn"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except Exception:  # noqa: BLE001
+            spec = None
+        for root in getattr(spec, "submodule_search_locations", None) or []:
+            for sub in ("lib", "bin"):
+                dll_dir = Path(root) / sub
+                if dll_dir.is_dir():
+                    try:
+                        os.add_dll_directory(str(dll_dir))
+                    except OSError:
+                        pass
+                    sdir = str(dll_dir)
+                    if sdir not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = sdir + os.pathsep + os.environ.get("PATH", "")
+
+
+def _load_whisper_model(model_name: str, device: str, compute_type: str):
+    """Load faster-whisper with optional auto CUDA resolution and CPU fallback."""
+    from faster_whisper import WhisperModel
+
+    def _build(dev: str, ctype: str):
+        if dev == "cuda":
+            _prepare_cuda_dlls()
+        resolved_ctype = ("float16" if dev == "cuda" else "int8") if ctype == "auto" else ctype
+        return retry_with_backoff(
+            lambda: WhisperModel(model_name, device=dev, compute_type=resolved_ctype),
+            attempts=3,
+            base_delay=2.0,
+            label=f"Whisper model '{model_name}' ({dev}/{resolved_ctype})",
+        )
+
+    if device == "auto":
+        try:
+            return _build("cuda", compute_type), "cuda"
+        except Exception as cuda_exc:  # noqa: BLE001
+            print(f"[warn] CUDA Whisper unavailable ({cuda_exc}); falling back to CPU/int8.", file=sys.stderr, flush=True)
+            return _build("cpu", "int8"), "cpu"
+    return _build(device, compute_type), device
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     """Run faster-whisper with word_timestamps over candidate windows or full audio."""
     import numpy as np
-    from faster_whisper import WhisperModel
 
     src = Path(args.audio)
     if not src.exists():
@@ -1047,6 +1116,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     if not args.full and not args.windows_file:
         raise ValueError("Specify either --windows-file or --full.")
 
+    # Always decode non-.f32 inputs via ffmpeg first to avoid PyAV metadata errors on long containers.
     cleanup_f32 = False
     if src.suffix.lower() == ".f32":
         f32_path = src
@@ -1058,16 +1128,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     try:
         try:
-            model = retry_with_backoff(
-                lambda: WhisperModel(args.model, device=args.device, compute_type=args.compute_type),
-                attempts=3,
-                base_delay=2.0,
-                label=f"Whisper model '{args.model}' download/load",
-            )
+            model, active_device = _load_whisper_model(args.model, args.device, args.compute_type)
         except Exception as exc:
             raise RuntimeError(
                 f"Could not load Whisper model '{args.model}': {exc}. "
-                "Try switching --model to 'base' or 'small'."
+                "Try switching --model to 'small' or 'base' with --device cpu."
             ) from exc
 
         wav = np.fromfile(str(f32_path), dtype=np.float32)
@@ -1095,13 +1160,23 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             }
             if args.language:
                 t_kw["language"] = args.language
-            segs, info = model.transcribe(seg_audio, **t_kw)
+            try:
+                segs, info = model.transcribe(seg_audio, **t_kw)
+                segs_list = list(segs)
+            except RuntimeError as rt_exc:
+                if active_device != "cpu":
+                    print(f"[warn] CUDA inference failed ({rt_exc}); retrying on CPU/int8.", file=sys.stderr, flush=True)
+                    model, active_device = _load_whisper_model(args.model, "cpu", "int8")
+                    segs, info = model.transcribe(seg_audio, **t_kw)
+                    segs_list = list(segs)
+                else:
+                    raise
             lang = getattr(info, "language", None)
             if lang:
                 detected_langs[lang] = detected_langs.get(lang, 0) + 1
 
             offset = win["start"]
-            for seg in segs:
+            for seg in segs_list:
                 words_out = []
                 if seg.words:
                     for w in seg.words:
@@ -1131,11 +1206,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             "source_path": str(src.resolve()),
             "duration_sec": round(total_dur, 3),
             "model": args.model,
+            "device": active_device,
             "detected_language": primary_lang,
             "segments": out_segments,
         }
         write_json(args.output, payload)
-        print(f"[transcribe] segments={len(out_segments)} lang={primary_lang} -> {args.output}")
+        print(f"[transcribe] segments={len(out_segments)} lang={primary_lang} device={active_device} -> {args.output}")
         return 0
     finally:
         if cleanup_f32 and f32_path.exists():
@@ -1692,11 +1768,63 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
 
 
 HYPE_PATTERN = re.compile(
-    r"(!|\?|\b(oh my god|omg|no way|what|wait|bro|dude|holy|clutch|nice|lets go|let's go|"
+    r"(!|\?|(?:j[aeiou]){2,}|"
+    r"\b(oh my god|omg|no way|what|wait|bro|dude|holy|clutch|nice|lets go|let's go|"
     r"haha|lmao|wtf|careful|watch out|run|cuidado|corre|qué|no manches|vamos|ay|ala|ostia|"
-    r"madre mía|increíble|épico|jaja|jajaja)\b)",
+    r"hostia|ostras|dios|no puede ser|no me lo creo|madre mía|increíble|épico|jaja|jajaja|jsjs|ajaj)\b)",
     re.IGNORECASE,
 )
+
+
+def robust_z_mad(values: Sequence[float], window: int = 180) -> list[float]:
+    """Compute local Median/MAD robust z-scores clipped to [-3, 6] per element."""
+    import statistics
+
+    n = len(values)
+    if n == 0:
+        return []
+    half = max(1, int(window) // 2)
+    out: list[float] = []
+    for i in range(n):
+        win = [float(x) for x in values[max(0, i - half) : min(n, i + half + 1)]]
+        med = statistics.median(win)
+        mad = statistics.median([abs(x - med) for x in win]) * 1.4826 + 1e-6
+        z = (float(values[i]) - med) / mad
+        out.append(round(max(-3.0, min(6.0, z)), 4))
+    return out
+
+
+def _audio_z_per_second(audio_path: Path, n_bins: int) -> list[float]:
+    """Extract normalized [0..1] per-second loudness peak boost via robust Median/MAD z-scores."""
+    import numpy as np
+
+    cleanup_f32 = False
+    if audio_path.suffix.lower() == ".f32":
+        f32_path = audio_path
+    else:
+        tmp = tempfile.NamedTemporaryFile(prefix="drift_hl_", suffix=".f32", delete=False)
+        tmp.close()
+        cleanup_f32 = True
+        f32_path = extract_f32_audio(audio_path, tmp.name, sample_rate=YAMNET_SR)
+
+    try:
+        wav = np.fromfile(str(f32_path), dtype=np.float32)
+        db_vals: list[float] = []
+        step_half = YAMNET_SR // 2  # 0.5 s frames aggregated by max/second
+        total_half = len(wav) // step_half
+        half_dbs = []
+        for idx in range(total_half):
+            chunk = wav[idx * step_half : (idx + 1) * step_half]
+            rms = float(np.sqrt(np.mean(chunk * chunk) + 1e-12))
+            half_dbs.append(20.0 * math.log10(rms))
+        for sec_i in range(n_bins):
+            pair = half_dbs[sec_i * 2 : sec_i * 2 + 2]
+            db_vals.append(max(pair) if pair else -90.0)
+        z_vals = robust_z_mad(db_vals, window=180)
+        return [round(min(1.0, max(0.0, z) / 4.0), 4) for z in z_vals]
+    finally:
+        if cleanup_f32 and f32_path.exists():
+            f32_path.unlink(missing_ok=True)
 
 
 def _snap_boundary(t: float, boundaries: Sequence[float], max_shift: float = 3.0) -> float:
@@ -1711,7 +1839,7 @@ def _snap_boundary(t: float, boundaries: Sequence[float], max_shift: float = 3.0
 
 
 def cmd_find_highlights(args: argparse.Namespace) -> int:
-    """Score full gameplay transcript + activity/scenes to extract >= min_count clips (>60s)."""
+    """Score full gameplay transcript + optional 16kHz audio z-scores + activity/scenes for >=5 Reels (>60s)."""
     t_doc = read_json_auto(args.transcript_file)
     segments = t_doc.get("segments", [])
     dur = float(t_doc.get("duration_sec") or 0.0)
@@ -1726,13 +1854,16 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
     visual_energy = [0.0] * n_bins
     audio_energy = [0.0] * n_bins
     boundaries: list[float] = [0.0, dur]
+    sentence_ends: list[float] = [0.0, dur]
 
     for seg in segments:
         sa, sb = float(seg["start"]), float(seg["end"])
         boundaries.extend([sa, sb])
-        txt = str(seg.get("text", ""))
+        txt = str(seg.get("text", "")).strip()
+        if txt.endswith((".", "!", "?", "…")):
+            sentence_ends.append(sb)
         nsp = float(seg.get("no_speech_prob", 0.5))
-        if nsp > 0.75 or not txt.strip():
+        if nsp > 0.75 or not txt:
             continue
         words = seg.get("words") or txt.split()
         span = max(0.5, sb - sa)
@@ -1742,6 +1873,13 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
         for sec_i in range(max(0, int(sa)), min(n_bins, int(math.ceil(sb)))):
             speech_energy[sec_i] = max(speech_energy[sec_i], 0.5 + 0.5 * w_rate)
             hype_energy[sec_i] = max(hype_energy[sec_i], hype_val)
+
+    audio_z_active = False
+    if getattr(args, "audio_f32", None):
+        az = _audio_z_per_second(Path(args.audio_f32), n_bins)
+        for sec_i in range(n_bins):
+            audio_energy[sec_i] = max(audio_energy[sec_i], az[sec_i])
+        audio_z_active = True
 
     if args.activity_file:
         act = read_json_auto(args.activity_file)
@@ -1767,8 +1905,10 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
                 visual_energy[int(t)] = max(visual_energy[int(t)], min(1.0, float(shot.get("score", 0.6))))
 
     boundaries = sorted(set(round(b, 2) for b in boundaries))
+    sentence_ends = sorted(set(round(b, 2) for b in sentence_ends))
+    snap_targets = sentence_ends if len(sentence_ends) >= 6 else boundaries
     total_per_sec = [
-        0.35 * speech_energy[i] + 0.35 * hype_energy[i] + 0.15 * visual_energy[i] + 0.15 * audio_energy[i]
+        0.30 * speech_energy[i] + 0.30 * hype_energy[i] + 0.15 * visual_energy[i] + 0.25 * audio_energy[i]
         for i in range(n_bins)
     ]
 
@@ -1776,43 +1916,89 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
     max_d = max(min_d, float(args.max_dur))
     candidates: list[dict[str, Any]] = []
 
+    def _score_window(sa: float, sb: float) -> dict[str, Any] | None:
+        if sb <= sa:
+            return None
+        i0, i1 = max(0, int(sa)), min(n_bins, int(math.ceil(sb)))
+        if i1 <= i0:
+            return None
+        span_len = max(1, i1 - i0)
+        mean_score = sum(total_per_sec[i0:i1]) / span_len
+        peak_density = sum(sorted(total_per_sec[i0:i1], reverse=True)[: max(1, span_len // 4)]) / max(
+            1, span_len // 4
+        )
+        hype_frac = sum(1 for x in hype_energy[i0:i1] if x > 0.2) / span_len
+        head_mean = sum(total_per_sec[i0 : min(i1, i0 + 8)]) / max(1, min(8, span_len))
+        tail_mean = sum(total_per_sec[max(i0, i1 - 8) : i1]) / max(1, min(8, span_len))
+        edge_bonus = 0.15 * (head_mean + tail_mean)
+
+        win_segs = [s for s in segments if s["end"] > sa and s["start"] < sb]
+        words_tok = [w.lower() for s in win_segs for w in str(s.get("text", "")).split() if w.strip()]
+        diversity = len(set(words_tok)) / max(1, len(words_tok))
+        mult = 1.0
+        if len(words_tok) < 15:
+            mult *= 0.55  # Penalize sparse/silent ambient spans
+        elif len(words_tok) > 25 and diversity < 0.28:
+            mult *= 0.65  # Penalize looped radio/TV background dialogue
+
+        base = mean_score + 0.35 * peak_density + 0.25 * hype_frac + edge_bonus
+        peak_sec = max(range(i0, i1), key=lambda sec_i: total_per_sec[sec_i])
+        return {
+            "start": round(sa, 3),
+            "end": round(sb, 3),
+            "duration": round(sb - sa, 3),
+            "peak_sec": int(peak_sec),
+            "score": round(base * mult, 3),
+        }
+
     if dur <= min_d:
-        candidates.append({"start": 0.0, "end": round(dur, 3), "score": round(sum(total_per_sec), 3)})
+        scored = _score_window(0.0, dur)
+        if scored:
+            candidates.append(scored)
     else:
         win_lengths = sorted({min_d, round((min_d + max_d) / 2.0, 1), max_d})
-        step = 5
+        seen_spans: set[tuple[float, float]] = set()
+        raw_ranges: list[tuple[float, float]] = []
+
+        # 1) Sliding windows across full timeline
         for wlen in win_lengths:
             if wlen > dur:
                 continue
-            for st in range(0, max(1, int(dur - wlen) + 1), step):
-                en = min(dur, st + wlen)
-                sa = _snap_boundary(float(st), boundaries, max_shift=3.0)
-                sb = _snap_boundary(float(en), boundaries, max_shift=3.0)
-                if sb - sa < min_d:
-                    sb = min(dur, sa + min_d)
-                if sb - sa > max_d:
-                    sb = sa + max_d
-                i0, i1 = max(0, int(sa)), min(n_bins, int(math.ceil(sb)))
-                if i1 <= i0:
-                    continue
-                span_len = max(1, i1 - i0)
-                mean_score = sum(total_per_sec[i0:i1]) / span_len
-                peak_density = sum(sorted(total_per_sec[i0:i1], reverse=True)[: max(1, span_len // 4)]) / max(
-                    1, span_len // 4
-                )
-                hype_frac = sum(1 for x in hype_energy[i0:i1] if x > 0.2) / span_len
-                # Penalize windows whose head or tail 10s are silent/dead air
-                head_mean = sum(total_per_sec[i0 : min(i1, i0 + 8)]) / max(1, min(8, span_len))
-                tail_mean = sum(total_per_sec[max(i0, i1 - 8) : i1]) / max(1, min(8, span_len))
-                edge_bonus = 0.15 * (head_mean + tail_mean)
-                candidates.append(
-                    {
-                        "start": round(sa, 3),
-                        "end": round(sb, 3),
-                        "duration": round(sb - sa, 3),
-                        "score": round(mean_score + 0.35 * peak_density + 0.25 * hype_frac + edge_bonus, 3),
-                    }
-                )
+            for st in range(0, max(1, int(dur - wlen) + 1), 5):
+                raw_ranges.append((float(st), min(dur, float(st) + wlen)))
+
+        # 2) Peak-aligned windows placing major climax around ~67% (2/3 build-up + 1/3 payoff)
+        top_peaks = sorted(range(n_bins), key=lambda sec_i: total_per_sec[sec_i], reverse=True)
+        picked_peaks: list[int] = []
+        for psec in top_peaks:
+            if total_per_sec[psec] <= 0.25:
+                break
+            if any(abs(psec - prev) < 25 for prev in picked_peaks):
+                continue
+            picked_peaks.append(psec)
+            for wlen in win_lengths:
+                if wlen <= dur:
+                    sa_raw = max(0.0, psec - 0.66 * wlen)
+                    sb_raw = min(dur, sa_raw + wlen)
+                    sa_raw = max(0.0, sb_raw - wlen)
+                    raw_ranges.append((sa_raw, sb_raw))
+            if len(picked_peaks) >= args.max_count * 3:
+                break
+
+        for st, en in raw_ranges:
+            sa = _snap_boundary(st, snap_targets, max_shift=3.5)
+            sb = _snap_boundary(en, snap_targets, max_shift=3.5)
+            if sb - sa < min_d:
+                sb = min(dur, sa + min_d)
+            if sb - sa > max_d:
+                sb = sa + max_d
+            key = (round(sa, 2), round(sb, 2))
+            if key in seen_spans or sb - sa < min_d - 0.5:
+                continue
+            seen_spans.add(key)
+            scored = _score_window(sa, sb)
+            if scored:
+                candidates.append(scored)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     selected: list[dict[str, Any]] = []
@@ -1834,42 +2020,83 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
 
     selected.sort(key=lambda c: c["start"])
     highlights: list[dict[str, Any]] = []
+    md_lines = [
+        "# Reel Highlight Candidates",
+        "",
+        "Review transcript context before cutting: pick stories with a strong opening hook (0-2 s), zero dead air, clean sentence endings, and a clear payoff.",
+        "",
+    ]
+
     for idx, sel in enumerate(selected, start=1):
         sa, sb = sel["start"], sel["end"]
         sub_segs = [s for s in segments if s["end"] > sa and s["start"] < sb]
-        preview = " ".join(s.get("text", "").strip() for s in sub_segs[:4]).strip()[:220]
+        full_text = " ".join(s.get("text", "").strip() for s in sub_segs if s.get("text", "").strip()).strip()
+        preview = full_text[:220]
 
-        # Extract up to 5 internal zoom/SFX peak cues spaced at least 6s apart
         i0, i1 = max(0, int(sa)), min(n_bins, int(math.ceil(sb)))
-        peak_secs = sorted(range(i0, i1), key=lambda sec_i: total_per_sec[sec_i], reverse=True)
-        zoom_cues: list[dict[str, Any]] = []
-        sfx_cues: list[dict[str, Any]] = []
-        for ps in peak_secs:
-            if len(zoom_cues) >= 5:
-                break
-            if ps - sa < 2.0 or sb - ps < 2.0:
-                continue
-            if any(abs(ps - z["abs_time"]) < 6.5 for z in zoom_cues):
-                continue
-            intensity = round(min(1.0, total_per_sec[ps]), 2)
-            zoom_cues.append(
-                {
-                    "rel_time": round(ps - sa, 2),
-                    "abs_time": float(ps),
-                    "intensity": intensity,
-                    "scale_target": round(1.08 + 0.10 * intensity, 3),
-                }
-            )
-            sfx_kind = "impact" if hype_energy[ps] >= 0.35 or audio_energy[ps] >= 0.6 else "whoosh"
-            sfx_cues.append(
-                {
-                    "rel_time": round(max(0.0, ps - sa - 0.12), 2),
-                    "abs_time": round(max(sa, ps - 0.12), 2),
-                    "sfx_kind": sfx_kind,
-                }
-            )
-        zoom_cues.sort(key=lambda z: z["rel_time"])
-        sfx_cues.sort(key=lambda z: z["rel_time"])
+        max_ae = max(audio_energy[i0:i1]) if i1 > i0 else 0.0
+        max_ve = max(visual_energy[i0:i1]) if i1 > i0 else 0.0
+        hype_hits = len(HYPE_PATTERN.findall(full_text))
+        reasons = []
+        if audio_z_active and max_ae >= 0.5:
+            reasons.append(f"voice_z +{max_ae * 4.0:.1f}")
+        elif max_ae >= 0.5:
+            reasons.append("audio_peak")
+        if hype_hits:
+            reasons.append(f"{hype_hits} hype/laugh cues")
+        if max_ve >= 0.5:
+            reasons.append("scene/activity peak")
+
+        # Editorial default: subtle entry accent only (no mid-clip effect spam unless --with-mid-cues)
+        zoom_cues: list[dict[str, Any]] = [
+            {
+                "kind": "entry",
+                "rel_time": 0.0,
+                "end_rel": 0.85,
+                "abs_time": round(sa, 3),
+                "intensity": 0.35,
+                "scale_from": 1.06,
+                "scale_target": 1.0,
+            }
+        ]
+        sfx_cues: list[dict[str, Any]] = [
+            {
+                "kind": "entry",
+                "rel_time": 0.0,
+                "abs_time": round(sa, 3),
+                "sfx_kind": "whoosh",
+            }
+        ]
+        if getattr(args, "with_mid_cues", False):
+            peak_secs = sorted(range(i0, i1), key=lambda sec_i: total_per_sec[sec_i], reverse=True)
+            for ps in peak_secs:
+                if len(zoom_cues) >= 5:
+                    break
+                if ps - sa < 2.0 or sb - ps < 2.0:
+                    continue
+                if any(abs(ps - z["abs_time"]) < 6.5 for z in zoom_cues):
+                    continue
+                intensity = round(min(1.0, total_per_sec[ps]), 2)
+                zoom_cues.append(
+                    {
+                        "kind": "mid",
+                        "rel_time": round(ps - sa, 2),
+                        "abs_time": float(ps),
+                        "intensity": intensity,
+                        "scale_target": round(1.08 + 0.10 * intensity, 3),
+                    }
+                )
+                sfx_kind = "impact" if hype_energy[ps] >= 0.35 or audio_energy[ps] >= 0.6 else "whoosh"
+                sfx_cues.append(
+                    {
+                        "kind": "mid",
+                        "rel_time": round(max(0.0, ps - sa - 0.12), 2),
+                        "abs_time": round(max(sa, ps - 0.12), 2),
+                        "sfx_kind": sfx_kind,
+                    }
+                )
+            zoom_cues.sort(key=lambda z: z["rel_time"])
+            sfx_cues.sort(key=lambda z: z["rel_time"])
 
         highlights.append(
             {
@@ -1878,12 +2105,23 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
                 "start": sa,
                 "end": sb,
                 "duration": round(sb - sa, 3),
+                "peak_abs_time": sel.get("peak_sec"),
+                "peak_pct": round((float(sel.get("peak_sec", sa)) - sa) / max(1.0, sb - sa), 2),
                 "score": sel["score"],
+                "reasons": reasons,
                 "bookmark_label": f"Reel #{idx} ({round(sb - sa, 1)}s)",
                 "transcript_preview": preview,
                 "zoom_cues": zoom_cues,
                 "sfx_cues": sfx_cues,
             }
+        )
+        md_lines.extend(
+            [
+                f"## Reel #{idx} | `{format_youtube_timestamp(sa)}–{format_youtube_timestamp(sb)}` ({sb - sa:.1f}s) | score={sel['score']} | {', '.join(reasons) or 'speech'}",
+                f"- Source seconds: `{sa} .. {sb}` | Climax at `{int(highlights[-1]['peak_pct'] * 100)}%`",
+                f"- Transcript: {full_text or '(no speech detected)'}",
+                "",
+            ]
         )
 
     warning = None
@@ -1893,15 +2131,20 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
             f">={min_d:.0f}s clips (requested >= {args.min_count})."
         )
 
+    out_path = Path(args.output)
+    md_path = Path(args.summary_md) if getattr(args, "summary_md", None) else out_path.with_suffix(".md")
+    write_text(md_path, "\n".join(md_lines))
+
     payload = {
         "ok": True,
         "source_duration": round(dur, 3),
         "count": len(highlights),
+        "summary_md": str(md_path),
         "warning": warning,
         "highlights": highlights,
     }
-    write_json(args.output, payload)
-    print(f"[find-highlights] count={len(highlights)} min_dur={min_d}s -> {args.output}")
+    write_json(out_path, payload)
+    print(f"[find-highlights] count={len(highlights)} min_dur={min_d}s md={md_path} -> {out_path}")
     return 0
 
 
@@ -1952,13 +2195,74 @@ def _map_word_to_timeline(
     return (seq_offset + (w_start - rng["start"]), seq_offset + (w_end - rng["start"]))
 
 
+def _normalize_match_token(token: str) -> str:
+    norm = unicodedata.normalize("NFD", token.lower())
+    stripped = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^a-z0-9ñ]", "", stripped) or token.lower()
+
+
+def align_words_to_script(
+    script_text: str,
+    whisper_words: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Align clean/corrected script tokens onto Whisper word timestamps (adapted from voz.py)."""
+    tokens = re.findall(r"\S+", script_text.strip())
+    if not tokens:
+        return []
+    if not whisper_words:
+        raise ValueError("Cannot align script without reference Whisper word timestamps.")
+
+    has_tl = "tl_start" in whisper_words[0]
+    sk = "tl_start" if has_tl else "start"
+    ek = "tl_end" if has_tl else "end"
+    wk = "word" if "word" in whisper_words[0] else "w"
+
+    a = [_normalize_match_token(t) for t in tokens]
+    b = [_normalize_match_token(str(w.get(wk, ""))) for w in whisper_words]
+    spans: list[tuple[float, float] | None] = [None] * len(tokens)
+
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            for k in range(i2 - i1):
+                spans[i1 + k] = (float(whisper_words[j1 + k][sk]), float(whisper_words[j1 + k][ek]))
+        elif i2 > i1 and j2 > j1:
+            s0 = float(whisper_words[j1][sk])
+            e0 = max(s0 + 0.05, float(whisper_words[j2 - 1][ek]))
+            total_chars = sum(len(tokens[k]) for k in range(i1, i2)) or 1
+            acc = 0.0
+            for k in range(i1, i2):
+                dur = (e0 - s0) * len(tokens[k]) / total_chars
+                spans[k] = (s0 + acc, s0 + acc + max(0.04, dur))
+                acc += dur
+
+    for k in range(len(tokens)):
+        if spans[k] is None:
+            prev_end = next((spans[j][1] for j in range(k - 1, -1, -1) if spans[j] is not None), 0.0)
+            nxt_start = next(
+                (spans[j][0] for j in range(k + 1, len(tokens)) if spans[j] is not None),
+                prev_end + 0.3,
+            )
+            spans[k] = (prev_end, max(prev_end + 0.05, min(nxt_start, prev_end + 0.35)))
+
+    out: list[dict[str, Any]] = []
+    base_meta = {k: v for k, v in whisper_words[0].items() if k not in (sk, ek, wk)}
+    for k, tok in enumerate(tokens):
+        sa, sb = spans[k]  # type: ignore[misc]
+        item = dict(base_meta)
+        item[sk] = round(float(sa), 3)
+        item[ek] = round(max(float(sa) + 0.04, float(sb)), 3)
+        item[wk] = tok
+        out.append(item)
+    return out
+
+
 def _group_words_into_cues(
     words: Sequence[dict[str, Any]],
     words_per_cue: int,
     max_cue_sec: float,
     min_cue_sec: float,
 ) -> list[dict[str, Any]]:
-    """Group mapped words into punchy short-form subtitle cues with zero overlaps."""
+    """Group mapped words into punchy 1-3 word karaoke-friendly cues with zero overlaps."""
     cues: list[dict[str, Any]] = []
     buf: list[dict[str, Any]] = []
 
@@ -1987,7 +2291,7 @@ def _group_words_into_cues(
             if not same_reel or len(buf) >= words_per_cue or gap > 0.35 or span > max_cue_sec:
                 _flush()
         buf.append(w)
-        if re.search(r"[.!?]$", w["word"]):
+        if re.search(r"[.,;:!?…]$", w["word"]):
             _flush()
     _flush()
 
@@ -2007,9 +2311,10 @@ def _group_words_into_cues(
 def _apply_translations(
     cues: Sequence[dict[str, Any]],
     trans_raw: Any,
-) -> list[dict[str, Any]]:
-    """Map cue-index or segment-range Spanish translations onto EN cues."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map Spanish translations (and optional cleaned EN copy) onto base cues."""
     by_idx: dict[int, str] = {}
+    en_override_by_idx: dict[int, str] = {}
     seg_list: list[dict[str, Any]] = []
 
     if isinstance(trans_raw, dict):
@@ -2026,7 +2331,11 @@ def _apply_translations(
         if not isinstance(item, dict):
             continue
         if "index" in item:
-            by_idx[int(item["index"])] = str(item.get("text_es") or item.get("text") or "").strip()
+            idx = int(item["index"])
+            by_idx[idx] = str(item.get("text_es") or item.get("text") or "").strip()
+            clean_en = str(item.get("text_en_clean") or item.get("text_en") or "").strip()
+            if clean_en:
+                en_override_by_idx[idx] = clean_en
         elif "start" in item and "end" in item:
             seg_list.append(
                 {
@@ -2036,18 +2345,30 @@ def _apply_translations(
                 }
             )
 
+    clean_en_cues = [
+        {
+            "index": c["index"],
+            "reel_id": c["reel_id"],
+            "start": c["start"],
+            "end": c["end"],
+            "text": en_override_by_idx.get(c["index"], c["text"]),
+        }
+        for c in cues
+    ]
+
     es_cues: list[dict[str, Any]] = []
     if by_idx:
-        for c in cues:
+        for c in clean_en_cues:
             es_cues.append(
                 {
                     "index": c["index"],
+                    "reel_id": c["reel_id"],
                     "start": c["start"],
                     "end": c["end"],
                     "text": by_idx.get(c["index"], c["text"]),
                 }
             )
-        return es_cues
+        return clean_en_cues, es_cues
 
     # Fallback: distribute segment-level Spanish phrases proportionally across cues inside [start, end]
     assigned: dict[int, list[str]] = {c["index"]: [] for c in cues}
@@ -2063,10 +2384,52 @@ def _apply_translations(
             if chunk:
                 assigned[mc["index"]].append(chunk)
 
-    for c in cues:
+    for c in clean_en_cues:
         txt = " ".join(assigned[c["index"]]).strip() or c["text"]
-        es_cues.append({"index": c["index"], "start": c["start"], "end": c["end"], "text": txt})
-    return es_cues
+        es_cues.append(
+            {
+                "index": c["index"],
+                "reel_id": c["reel_id"],
+                "start": c["start"],
+                "end": c["end"],
+                "text": txt,
+            }
+        )
+    return clean_en_cues, es_cues
+
+
+def _build_per_reel_clip_specs(
+    reel_spans: Sequence[dict[str, Any]],
+    cues: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group timeline cues into independent per-Reel clip payloads for Drift Option C."""
+    by_reel: dict[str, list[dict[str, Any]]] = {}
+    for c in cues:
+        by_reel.setdefault(str(c["reel_id"]), []).append(c)
+
+    out: list[dict[str, Any]] = []
+    for idx, sp in enumerate(reel_spans, start=1):
+        rid = str(sp["reel_id"])
+        r_start = round(float(sp["tl_start"]), 3)
+        r_dur = round(max(0.5, float(sp["duration"])), 3)
+        r_end = round(r_start + r_dur, 3)
+        clip_cues: list[dict[str, Any]] = []
+        for c in by_reel.get(rid, []):
+            ca = max(r_start, round(float(c["start"]), 3))
+            cb = min(r_end, round(float(c["end"]), 3))
+            if cb - ca >= 0.05 and str(c.get("text", "")).strip():
+                clip_cues.append({"start": ca, "end": cb, "text": str(c["text"]).strip()})
+        out.append(
+            {
+                "reel_id": rid,
+                "reel_index": idx,
+                "start": r_start,
+                "end": r_end,
+                "duration": r_dur,
+                "cues": clip_cues,
+            }
+        )
+    return out
 
 
 def _write_srt(path: Path, cues: Sequence[dict[str, Any]]) -> None:
@@ -2081,7 +2444,7 @@ def _write_srt(path: Path, cues: Sequence[dict[str, Any]]) -> None:
 
 
 def cmd_build_reel_subs(args: argparse.Namespace) -> int:
-    """Build synchronized EN and ES punchy viral .srt tracks for Reels/Shorts."""
+    """Build synchronized EN/ES SRTs and per-Reel Drift clip cues (with optional script alignment)."""
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     t_doc = read_json_auto(args.transcript_file)
@@ -2095,6 +2458,17 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
                 inspect_clips.extend(tr.get("items", []))
                 break
         inspect_clips.sort(key=lambda c: float(c.get("start", 0.0)))
+
+    corrected_scripts: dict[str, str] = {}
+    if getattr(args, "corrected_script", None):
+        raw_corr = read_json_auto(args.corrected_script)
+        if isinstance(raw_corr, dict):
+            corrected_scripts = {str(k): str(v) for k, v in raw_corr.items()}
+        elif isinstance(raw_corr, list):
+            for idx, item in enumerate(raw_corr, start=1):
+                if isinstance(item, dict):
+                    rid = str(item.get("reel_id") or item.get("id") or f"reel_{idx}")
+                    corrected_scripts[rid] = str(item.get("text") or item.get("script") or "")
 
     # Collect words (or split segment text proportionally if word list missing)
     all_words: list[dict[str, Any]] = []
@@ -2114,9 +2488,12 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
                 all_words.append({"start": sa + k * dt, "end": sa + (k + 1) * dt, "word": tok})
 
     mapped_words: list[dict[str, Any]] = []
+    reel_spans: list[dict[str, Any]] = []
     seq_cursor = 0.0
-    for rng in ranges:
+    for idx, rng in enumerate(ranges):
         ra, rb = rng["start"], rng["end"]
+        reel_words: list[dict[str, Any]] = []
+        matched_clip = inspect_clips[idx] if idx < len(inspect_clips) else None
         for w in all_words:
             mid = 0.5 * (w["start"] + w["end"])
             if ra <= mid <= rb:
@@ -2131,7 +2508,7 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
                 if mapped is None:
                     continue
                 tl_a, tl_b = mapped
-                mapped_words.append(
+                reel_words.append(
                     {
                         "reel_id": rng["id"],
                         "tl_start": tl_a,
@@ -2139,6 +2516,20 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
                         "word": w["word"],
                     }
                 )
+        if rng["id"] in corrected_scripts and corrected_scripts[rng["id"]].strip() and reel_words:
+            reel_words = align_words_to_script(corrected_scripts[rng["id"]], reel_words)
+        mapped_words.extend(reel_words)
+
+        if matched_clip is not None:
+            tl_s = float(matched_clip.get("start", seq_cursor))
+            dur = float(matched_clip.get("duration", rb - ra))
+        elif args.timeline_mode == "source":
+            tl_s = ra
+            dur = rb - ra
+        else:
+            tl_s = seq_cursor
+            dur = rb - ra
+        reel_spans.append({"reel_id": rng["id"], "tl_start": round(tl_s, 3), "duration": round(dur, 3)})
         seq_cursor += (rb - ra) + float(args.gap_sec)
 
     en_cues = _group_words_into_cues(
@@ -2147,8 +2538,6 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
         max_cue_sec=args.max_cue_sec,
         min_cue_sec=args.min_cue_sec,
     )
-    en_srt = out_dir / "reels_en.srt"
-    _write_srt(en_srt, en_cues)
 
     translation_sheet = [
         {"index": c["index"], "reel_id": c["reel_id"], "start": c["start"], "end": c["end"], "text_en": c["text"]}
@@ -2157,22 +2546,242 @@ def cmd_build_reel_subs(args: argparse.Namespace) -> int:
     write_json(out_dir / "cues_for_translation.json", translation_sheet)
 
     es_srt_path: str | None = None
+    es_clips_path: str | None = None
     if args.translated_json:
         trans_raw = read_json_auto(args.translated_json)
-        es_cues = _apply_translations(en_cues, trans_raw)
+        en_cues, es_cues = _apply_translations(en_cues, trans_raw)
         es_srt = out_dir / "reels_es.srt"
         _write_srt(es_srt, es_cues)
         es_srt_path = str(es_srt)
+        es_clips = _build_per_reel_clip_specs(reel_spans, es_cues)
+        es_clips_file = out_dir / "reel_clips_es.json"
+        write_json(es_clips_file, {"ok": True, "lang": "es", "reels": es_clips})
+        es_clips_path = str(es_clips_file)
+
+    en_srt = out_dir / "reels_en.srt"
+    _write_srt(en_srt, en_cues)
+    en_clips = _build_per_reel_clip_specs(reel_spans, en_cues)
+    en_clips_file = out_dir / "reel_clips_en.json"
+    write_json(en_clips_file, {"ok": True, "lang": "en", "reels": en_clips})
 
     manifest = {
         "ok": True,
         "cue_count": len(en_cues),
+        "reel_count": len(reel_spans),
         "reels_en_srt": str(en_srt),
         "reels_es_srt": es_srt_path,
+        "reel_clips_en": str(en_clips_file),
+        "reel_clips_es": es_clips_path,
         "cues_for_translation": str(out_dir / "cues_for_translation.json"),
     }
     write_json(out_dir / "reel_subs_manifest.json", manifest)
-    print(f"[build-reel-subs] cues={len(en_cues)} es={'yes' if es_srt_path else 'pending'} -> {out_dir}")
+    print(f"[build-reel-subs] cues={len(en_cues)} reels={len(reel_spans)} es={'yes' if es_srt_path else 'pending'} -> {out_dir}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: apply-reel-subs (Native Option C per-Reel karaoke tracks in Drift)
+# ---------------------------------------------------------------------------
+
+
+def _extract_subtitle_clip_specs(path: str | Path) -> list[dict[str, Any]]:
+    data = read_json_auto(path)
+    reels = data.get("reels", data) if isinstance(data, dict) else data
+    return [r for r in reels if isinstance(r, dict) and r.get("cues")]
+
+
+def _apply_checked(
+    url: str,
+    token: str,
+    ops: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+    atomic: bool = True,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    args: dict[str, Any] = {"ops": ops}
+    if dry_run:
+        args["dry_run"] = True
+    elif atomic:
+        args["atomic"] = True
+    res, _, is_ok = _post_mcp_tool(url, token, "apply", args, timeout=timeout)
+    if not is_ok or not isinstance(res, dict) or not res.get("ok"):
+        raise RuntimeError(f"Drift apply failed (dry_run={dry_run}): {json.dumps(res, ensure_ascii=False)}")
+    return res
+
+
+def _to_clip_local_cues(cues: Sequence[dict[str, Any]], clip_start: float, clip_dur: float) -> list[dict[str, Any]]:
+    """Convert timeline-coordinate cues into clip-local [0..clip_dur] cues required by Drift's player."""
+    if not cues:
+        return []
+    need_shift = clip_start > 0.0 and min(float(c["start"]) for c in cues) >= clip_start - 0.05
+    offset = clip_start if need_shift else 0.0
+    local: list[dict[str, Any]] = []
+    for c in cues:
+        sa = max(0.0, round(float(c["start"]) - offset, 3))
+        sb = min(clip_dur, round(float(c["end"]) - offset, 3))
+        if sb - sa >= 0.05 and str(c.get("text", "")).strip():
+            local.append({"start": sa, "end": sb, "text": str(c["text"]).strip()})
+    return local
+
+
+def _populate_drift_subtitle_track(
+    url: str,
+    token: str,
+    reels: Sequence[dict[str, Any]],
+    style_cfg: dict[str, Any],
+    *,
+    staging_start: float,
+    preset: str,
+    pos_y: float,
+    track_label: str,
+) -> list[dict[str, Any]]:
+    """Create 1 independent subtitle clip per Reel, trim/place, inject clip-local cues, and style cleanly."""
+    if not reels:
+        return []
+
+    stage_ops = [
+        {"tool": "add_subtitle_clip", "args": {"at": round(staging_start + i * 35.0, 3)}}
+        for i in range(len(reels))
+    ]
+    _apply_checked(url, token, stage_ops, dry_run=True)
+    res_stage = _apply_checked(url, token, stage_ops, atomic=True)
+    created_ids = [d["result"]["id"] for d in res_stage.get("done", [])]
+    if len(created_ids) != len(reels):
+        raise RuntimeError(f"Expected {len(reels)} subtitle clips for '{track_label}', got {len(created_ids)}")
+
+    polish_ops: list[dict[str, Any]] = []
+    summary_items: list[dict[str, Any]] = []
+    for cid, reel in zip(created_ids, reels):
+        r_start = round(float(reel["start"]), 3)
+        r_dur = round(float(reel["duration"]), 3)
+        local_cues = _to_clip_local_cues(reel["cues"], r_start, r_dur)
+        polish_ops.append({"tool": "set_trim", "args": {"clip": cid, "in": 0.0, "out": r_dur}})
+        polish_ops.append({"tool": "move_clip", "args": {"clip": cid, "at": r_start}})
+        polish_ops.append({"tool": "set_subtitle_cues", "args": {"clip": cid, "cues": local_cues}})
+        if preset and preset != "none":
+            polish_ops.append({"tool": "apply_text_preset", "args": {"clip": cid, "preset": preset}})
+        polish_ops.append({"tool": "set_text", "args": {"clip": cid, "style": style_cfg}})
+        polish_ops.append(
+            {"tool": "set_transform", "args": {"clip": cid, "positionX": 540, "positionY": pos_y, "scaleX": 1.0, "scaleY": 1.0}}
+        )
+        summary_items.append(
+            {"clip": cid, "reel_id": reel.get("reel_id"), "start": r_start, "duration": r_dur, "cues": len(local_cues)}
+        )
+
+    _apply_checked(url, token, polish_ops, dry_run=True)
+    _apply_checked(url, token, polish_ops, atomic=True)
+    return summary_items
+
+
+def cmd_apply_reel_subs(args: argparse.Namespace) -> int:
+    """Create independent per-Reel native EN/ES karaoke subtitle tracks inside CutWire Drift."""
+    url, token = _resolve_mcp_credentials(args)
+    if not url or not token:
+        raise RuntimeError("Both --url (or DRIFT_MCP_URL) and --token (or DRIFT_MCP_TOKEN) are required.")
+
+    en_path = args.en_clips
+    es_path = args.es_clips
+    if args.manifest:
+        man = read_json_auto(args.manifest)
+        en_path = en_path or man.get("reel_clips_en")
+        es_path = es_path or man.get("reel_clips_es")
+
+    en_reels = _extract_subtitle_clip_specs(en_path) if en_path and Path(en_path).exists() else []
+    es_reels = _extract_subtitle_clip_specs(es_path) if es_path and Path(es_path).exists() else []
+    if not en_reels and not es_reels:
+        raise ValueError("No per-Reel subtitle clips found; pass --manifest or --en-clips / --es-clips.")
+
+    tracks_by_lang = []
+    if args.primary_lang == "es":
+        if en_reels:
+            tracks_by_lang.append(("en", en_reels, True))
+        if es_reels:
+            tracks_by_lang.append(("es", es_reels, False))
+    else:
+        if es_reels:
+            tracks_by_lang.append(("es", es_reels, True))
+        if en_reels:
+            tracks_by_lang.append(("en", en_reels, False))
+
+    style_cfg: dict[str, Any] = {
+        "fontFamily": args.font,
+        "pixelSize": int(args.pixel_size),
+        "letterSpacing": int(args.letter_spacing),
+        "textCase": args.text_case,
+        "align": "center",
+        "valign": "center",
+        "boxEnabled": False,
+        "accent": {
+            "rule": "karaoke",
+            "color": args.accent_color,
+            "colorEnabled": True,
+            "sizeScale": float(args.size_scale),
+        },
+    }
+
+    if args.dry_run:
+        plan = {
+            "ok": True,
+            "dry_run": True,
+            "preset": args.preset,
+            "style": style_cfg,
+            "pos_y": args.pos_y,
+            "tracks_order": [{"lang": lang, "clips": len(rs), "hidden": hid} for lang, rs, hid in reversed(tracks_by_lang)],
+        }
+        if args.output:
+            write_json(args.output, plan)
+        print(f"[apply-reel-subs] dry-run tracks={len(tracks_by_lang)}")
+        return 0
+
+    ins, _, ok_ins = _post_mcp_tool(url, token, "inspect", {"clips": False})
+    if not ok_ins or not isinstance(ins, dict):
+        raise RuntimeError(f"Drift inspect failed: {ins}")
+    existing_subs = [t for t in ins.get("tracks", []) if t.get("type") == "subtitle"]
+    if existing_subs and not args.allow_extra_tracks:
+        raise RuntimeError(
+            f"Project already has {len(existing_subs)} subtitle track(s); remove them or pass --allow-extra-tracks."
+        )
+
+    staging_base = max(float(ins.get("dur") or 0.0) + 30.0, 600.0)
+    applied_tracks: list[dict[str, Any]] = []
+
+    for idx, (lang, reels, should_hide) in enumerate(tracks_by_lang):
+        if idx > 0 or existing_subs:
+            prep_ops = [{"tool": "add_track", "args": {"type": "subtitle"}}]
+            _apply_checked(url, token, prep_ops, dry_run=True)
+            _apply_checked(url, token, prep_ops, atomic=True)
+        items = _populate_drift_subtitle_track(
+            url,
+            token,
+            reels,
+            style_cfg,
+            staging_start=staging_base + idx * 1000.0,
+            preset=args.preset,
+            pos_y=float(args.pos_y),
+            track_label=lang,
+        )
+        applied_tracks.append({"lang": lang, "hidden": should_hide, "clips": items})
+
+    vis_ops = []
+    n_tracks = len(applied_tracks)
+    # Last appended language sits on Track 0; first appended shifted down to Track n_tracks - 1.
+    for pos, entry in enumerate(reversed(applied_tracks)):
+        vis_ops.append({"tool": "set_track", "args": {"track": pos, "hidden": bool(entry["hidden"])}})
+    if vis_ops:
+        _apply_checked(url, token, vis_ops, dry_run=True)
+        _apply_checked(url, token, vis_ops, atomic=True)
+
+    result = {
+        "ok": True,
+        "preset": args.preset,
+        "pos_y": float(args.pos_y),
+        "tracks": [{"track": i, **entry} for i, entry in enumerate(reversed(applied_tracks))],
+        "track_count": n_tracks,
+    }
+    if args.output:
+        write_json(args.output, result)
+    print(f"[apply-reel-subs] ok tracks={n_tracks} primary={args.primary_lang}")
     return 0
 
 
@@ -2241,9 +2850,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_mode = p_tr.add_mutually_exclusive_group(required=True)
     g_mode.add_argument("--windows-file", help="JSON with music_windows / windows list")
     g_mode.add_argument("--full", action="store_true", help="Transcribe entire clip")
-    p_tr.add_argument("--model", default="base", help="Whisper model size (tiny, base, small, medium)")
-    p_tr.add_argument("--device", default="cpu")
-    p_tr.add_argument("--compute-type", default="int8")
+    p_tr.add_argument("--model", default="small", help="Whisper model size (tiny, base, small, medium, large-v3-turbo)")
+    p_tr.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    p_tr.add_argument("--compute-type", default="auto")
     p_tr.add_argument("--language", default=None, help="Optional ISO language code (e.g. en, es)")
     p_tr.add_argument("--vad-filter", action="store_true", help="Enable Silero VAD filter")
     p_tr.add_argument("--no-speech-threshold", type=float, default=0.7)
@@ -2271,6 +2880,7 @@ def build_parser() -> argparse.ArgumentParser:
     # find-highlights
     p_fh = sub.add_parser("find-highlights", help="Score and pick >=5 highlights (>60s) for Reels/Shorts.")
     p_fh.add_argument("--transcript-file", required=True, help="Full transcript JSON")
+    p_fh.add_argument("--audio-f32", help="Optional 16kHz .f32 or media source for Median/MAD loudness peak z-scores")
     p_fh.add_argument("--activity-file", help="Optional Drift activity() JSON")
     p_fh.add_argument("--scenes-file", help="Optional Drift list_scenes() JSON")
     p_fh.add_argument("--min-dur", type=float, default=60.0)
@@ -2278,22 +2888,46 @@ def build_parser() -> argparse.ArgumentParser:
     p_fh.add_argument("--min-count", type=int, default=5)
     p_fh.add_argument("--max-count", type=int, default=8)
     p_fh.add_argument("--min-gap", type=float, default=5.0)
+    p_fh.add_argument("--summary-md", help="Optional Markdown candidate review output path (defaults beside --output)")
+    p_fh.add_argument("--with-mid-cues", action="store_true", help="Also emit internal mid-clip zoom/SFX cues (off by default)")
     p_fh.add_argument("--output", required=True, help="Output JSON path")
     p_fh.set_defaults(func=cmd_find_highlights)
 
     # build-reel-subs
-    p_br = sub.add_parser("build-reel-subs", help="Build dynamic dual EN/ES SRT files for Reels.")
+    p_br = sub.add_parser("build-reel-subs", help="Build dynamic dual EN/ES SRTs and per-Reel Drift clip specs.")
     p_br.add_argument("--transcript-file", required=True, help="Full transcript JSON")
     p_br.add_argument("--ranges-file", required=True, help="highlights.json or ranges JSON")
     p_br.add_argument("--inspect-file", help="Optional arranged Reels inspect JSON for exact timeline mapping")
     p_br.add_argument("--timeline-mode", choices=("sequence", "source"), default="sequence")
     p_br.add_argument("--gap-sec", type=float, default=0.0, help="Gap between sequential clips if no inspect-file")
-    p_br.add_argument("--translated-json", help="JSON with Spanish cue or segment translations")
+    p_br.add_argument("--corrected-script", help="Optional JSON mapping reel_id -> clean text for word-timestamp alignment")
+    p_br.add_argument("--translated-json", help="JSON with Spanish translations (and optional cleaned text_en)")
     p_br.add_argument("--words-per-cue", type=int, default=3)
-    p_br.add_argument("--max-cue-sec", type=float, default=1.8)
+    p_br.add_argument("--max-cue-sec", type=float, default=1.6)
     p_br.add_argument("--min-cue-sec", type=float, default=0.25)
-    p_br.add_argument("--out-dir", required=True, help="Output directory for .srt files")
+    p_br.add_argument("--out-dir", required=True, help="Output directory for .srt and reel_clips_*.json files")
     p_br.set_defaults(func=cmd_build_reel_subs)
+
+    # apply-reel-subs
+    p_ar = sub.add_parser("apply-reel-subs", help="Push per-Reel native EN/ES karaoke subtitle tracks into Drift.")
+    p_ar.add_argument("--url", help="Drift /mcp URL (or DRIFT_MCP_URL env var)")
+    p_ar.add_argument("--token", help="Drift Bearer token (or DRIFT_MCP_TOKEN env var)")
+    p_ar.add_argument("--manifest", help="Path to reel_subs_manifest.json from build-reel-subs")
+    p_ar.add_argument("--en-clips", help="Optional reel_clips_en.json path")
+    p_ar.add_argument("--es-clips", help="Optional reel_clips_es.json path")
+    p_ar.add_argument("--primary-lang", choices=("es", "en"), default="es")
+    p_ar.add_argument("--preset", default="karaoke-pop")
+    p_ar.add_argument("--font", default="Anton")
+    p_ar.add_argument("--pixel-size", type=int, default=64)
+    p_ar.add_argument("--letter-spacing", type=int, default=2)
+    p_ar.add_argument("--text-case", default="upper", choices=("none", "upper", "lower", "title", "sentence"))
+    p_ar.add_argument("--accent-color", default="#ffffd400")
+    p_ar.add_argument("--size-scale", type=float, default=1.0)
+    p_ar.add_argument("--pos-y", type=float, default=1435.0)
+    p_ar.add_argument("--allow-extra-tracks", action="store_true")
+    p_ar.add_argument("--dry-run", action="store_true")
+    p_ar.add_argument("--output", help="Optional JSON summary output path")
+    p_ar.set_defaults(func=cmd_apply_reel_subs)
 
     return parser
 

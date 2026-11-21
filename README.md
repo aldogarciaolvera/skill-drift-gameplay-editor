@@ -12,11 +12,11 @@ Soporta dos modos de edición:
    - Marca casos dudosos con `add_bookmark` y genera `youtube_credits.txt`, `chapters.txt` y `edit_report.md`.
 
 2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, `> 60 s`):**
-   - Pensado para ejecutarse sobre un proyecto nuevo con el gameplay ya editado y exportado.
-   - Cambia el lienzo a `1080×1920`, arma el encuadre vertical (`set_background` / fondo desenfocado o `auto_reframe`).
-   - Analiza todo el video (`activity` + `detect_scenes` + `transcribe --full` + `find-highlights`) para extraer al menos **5 clips virales de `60–90 s`**.
-   - Añade zooms dinámicos con keyframes, efectos (`zoom_pulse` / `camera_shake` ligero), transiciones dinámicas y SFX (`whoosh`, `impact`, `pop`).
-   - Genera e importa **dos pistas independientes de subtítulos estilizados** (`Subtitles EN` y `Subtitles ES`), ocultando una para exportar fácilmente ambas versiones.
+   - Pensado para editar clips verticales limpios desde gameplay ya editado o crudo.
+   - Cambia el lienzo a `1080×1920`, elige el encuadre vertical (`solo_juego` con fondo desenfocado sin barras negras, `facecam` arriba/juego abajo, o `a_camara` vía `auto_reframe`).
+   - Analiza audio (`z` robusta mediana/MAD), actividad, escenas y transcripción (`find-highlights`) generando `highlights.md` para curación humana y extracción de al menos **5 clips narrativos de `60–90 s`** con clímax hacia ~65–70 % del clip.
+   - Mantiene la edición limpia (sin spam de efectos ni sacudidas en mitad del diálogo): aplica **únicamente un acento/whoosh sutil de entrada al inicio de cada Reel** y normaliza cerca de `−14 LUFS`.
+   - Genera e importa **dos pistas independientes de subtítulos** (`Subtitles EN` y `Subtitles ES`), ocultando una para exportar fácilmente ambas versiones.
 
 ---
 
@@ -120,7 +120,7 @@ Si mantienes el repositorio clonado en otra carpeta (por ejemplo `C:\Users\<usua
    - **Modo A (YouTube 16:9):**
      > "Usa `drift-gameplay-editor` para editar este gameplay largo para YouTube: recorta pausas, mutea música con copyright conservando diálogos, rellena huecos y conducción con música Free To Use y genera créditos/capítulos. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
    - **Modo B (Reels / Shorts 9:16):**
-     > "Usa `drift-gameplay-editor` en modo Reels 9:16 sobre este gameplay ya editado: saca al menos 5 clips de más de 1 minuto con zooms, SFX y subtítulos en inglés y español. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
+     > "Usa `drift-gameplay-editor` en modo Reels 9:16 sobre este gameplay: saca al menos 5 clips narrativos de más de 1 minuto con encuadre vertical limpio, solo entrada sutil al Reel (sin exceso de efectos) y subtítulos en inglés y español. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
 
 > **Seguridad:** Nunca guardes ni subas a GitHub tokens o URLs reales de una sesión en archivos de la skill. Pásalos solo en el prompt o mediante variables de entorno (`DRIFT_MCP_URL` / `DRIFT_MCP_TOKEN`).
 
@@ -141,19 +141,20 @@ uv run scripts/drift_gameplay_cli.py scan-pauses --video "./video.mp4" --ref-pau
 uv run scripts/drift_gameplay_cli.py detect-music --video "./video.mp4" --keep-f32 ./out/audio.f32 --output ./out/music.json
 
 # 4. Transcribir ventanas musicales o el video completo con Whisper
-uv run scripts/drift_gameplay_cli.py transcribe --audio ./out/audio.f32 --windows-file ./out/music.json --model base --output ./out/transcript.json
-uv run scripts/drift_gameplay_cli.py transcribe --audio "./edited.mp4" --full --model base --output ./out/full_transcript.json
+uv run scripts/drift_gameplay_cli.py transcribe --audio ./out/audio.f32 --windows-file ./out/music.json --model small --device auto --output ./out/transcript.json
+uv run scripts/drift_gameplay_cli.py transcribe --audio "./edited.mp4" --full --model small --device auto --output ./out/full_transcript.json
 
 # 5. Planificar lotes apply y entregables para YouTube
 uv run scripts/drift_gameplay_cli.py plan-youtube --stage cuts --inspect-file ./out/inspect.json --pauses-file ./out/pauses.json --out-dir ./out/plan
 uv run scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post.json --pauses-file ./out/pauses.json --music-file ./out/music.json --transcript-file ./out/transcript.json --fill-assets-file ./out/fill_assets.json --out-dir ./out/plan
 
-# 6. Detectar >= 5 highlights (>60 s) para Reels/Shorts
-uv run scripts/drift_gameplay_cli.py find-highlights --transcript-file ./out/full_transcript.json --activity-file ./out/activity.json --min-dur 60 --min-count 5 --output ./out/highlights.json
+# 6. Detectar >= 5 highlights (>60 s) y generar highlights.md para curación (entrada limpia por defecto)
+uv run scripts/drift_gameplay_cli.py find-highlights --transcript-file ./out/full_transcript.json --audio-f32 ./out/audio.f32 --activity-file ./out/activity.json --min-dur 60 --min-count 5 --output ./out/highlights.json
 
-# 7. Generar subtítulos virales duales EN/ES (.srt)
-uv run scripts/drift_gameplay_cli.py build-reel-subs --transcript-file ./out/full_transcript.json --ranges-file ./out/highlights.json --words-per-cue 3 --out-dir ./out/subs
-uv run scripts/drift_gameplay_cli.py build-reel-subs --transcript-file ./out/full_transcript.json --ranges-file ./out/highlights.json --translated-json ./out/subs/translated_cues.json --words-per-cue 3 --out-dir ./out/subs
+# 7. Generar subtítulos por Reel EN/ES y empujarlos nativamente a Drift (karaoke palabra a palabra)
+uv run scripts/drift_gameplay_cli.py build-reel-subs --transcript-file ./out/full_transcript.json --ranges-file ./out/highlights.json --inspect-file ./out/inspect_reels.json --words-per-cue 3 --out-dir ./out/subs
+uv run scripts/drift_gameplay_cli.py build-reel-subs --transcript-file ./out/full_transcript.json --ranges-file ./out/highlights.json --inspect-file ./out/inspect_reels.json --translated-json ./out/subs/translated_cues.json --words-per-cue 3 --out-dir ./out/subs
+uv run scripts/drift_gameplay_cli.py apply-reel-subs --url "http://127.0.0.1:4731/mcp" --token "<TOKEN>" --manifest ./out/subs/reel_subs_manifest.json --primary-lang es --output ./out/subs/apply_subs_result.json
 ```
 
 ---
