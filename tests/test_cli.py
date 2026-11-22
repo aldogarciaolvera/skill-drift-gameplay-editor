@@ -627,6 +627,88 @@ class DriftGameplayCliTests(unittest.TestCase):
             self.assertAlmostEqual(p0["start"], 3.0, delta=0.4)
             self.assertAlmostEqual(p0["end"], 6.0, delta=0.4)
 
+    def test_load_windows_highlights_and_drift_flat_activity_format(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            hl_path = tdp / "curated.json"
+            hl_path.write_text(
+                json.dumps(
+                    {
+                        "highlights": [
+                            {"tag": "REEL1", "start": 12.5, "end": 80.0, "title": "Highlight uno"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = cli._load_windows(hl_path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["tag"], "REEL1")
+            self.assertAlmostEqual(loaded[0]["start"], 12.5)
+            self.assertAlmostEqual(loaded[0]["end"], 80.0)
+
+            segments = []
+            for t0 in [10, 90, 170, 250, 330]:
+                for off in range(0, 50, 5):
+                    sa = float(t0 + off)
+                    segments.append(
+                        {
+                            "tag": "FULL",
+                            "start": sa,
+                            "end": sa + 3.0,
+                            "text": "Wait what happened right there?!",
+                            "no_speech_prob": 0.05,
+                            "avg_logprob": -0.2,
+                            "words": [],
+                        }
+                    )
+            tr_path = tdp / "tr.json"
+            act_path = tdp / "activity_drift.json"
+            out_path = tdp / "out_hl.json"
+            tr_path.write_text(
+                json.dumps({"ok": True, "duration_sec": 410.0, "segments": segments}),
+                encoding="utf-8",
+            )
+            act_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "start": 0,
+                        "step": 18,
+                        "audio": [0.2 + 0.05 * (i % 5) for i in range(23)],
+                        "content": [10.0 + float(i % 6) for i in range(23)],
+                        "motion": [0.15] * 23,
+                        "peaks": [
+                            {"t": 18, "content": 18.5},
+                            {"t": 108, "content": 17.2},
+                            {"t": 180, "content": 16.4},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rc = cli.main(
+                [
+                    "find-highlights",
+                    "--transcript-file",
+                    str(tr_path),
+                    "--activity-file",
+                    str(act_path),
+                    "--min-dur",
+                    "60",
+                    "--max-dur",
+                    "75",
+                    "--min-count",
+                    "5",
+                    "--output",
+                    str(out_path),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            doc = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertGreaterEqual(doc["count"], 5)
+            self.assertGreater(len(doc["highlights"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

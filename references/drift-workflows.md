@@ -36,20 +36,25 @@ Verified tool conventions, schemas, presets, and audio/video recipes for automat
 ## 2. Mode A — Long YouTube Gameplay (16:9) Recipes
 
 ### 2.1 Separating Linked Audio
+
 Before muting music segments independently of video cuts:
+
 1. Check `inspect({"clips": true})`. If video clips still carry embedded audio (no matching separated `audio` clips linked via `linkId`), run:
    - `select_clips({"clips": ["<video-uuid-1>", ...]})`
    - `separate_audio({})`
 2. Re-run `inspect({"clips": true})` to map each video clip's `linkId` to its separated audio clip UUID.
 
 ### 2.2 Timeline Coordinate Mapping
+
 Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `speed = 1`):
+
 - Source second `t_src` (inside `[inPoint, outPoint]`) -> Timeline second:
   `t_tl = start + (t_src - inPoint) / speed`
 - Timeline second `t_tl` -> Source second:
   `t_src = inPoint + (t_tl - start) * speed`
 
 ### 2.3 Pause, Loading, Map & Dead-Screen Cuts
+
 - **Head/Tail trims:** Use `set_trim({"clip": "<uuid>", "in": <src_in>, "out": <src_out>, "ripple": true})`. `ripple: true` trims linked audio too and shifts later clips left cleanly.
 - **Interior cuts:** Split video clips from **latest timeline time to earliest** using `split_clip({"clip": "<uuid>", "at": <tl_time>})` so earlier split points stay inside the original UUID. Then delete the unwanted middle segments via `delete_clips({"clips": [...], "ripple": true, "with_effects": true})`.
 - **Visual verification:** Use `frames({"at": [...]})` or `capture({"at": ...})` around candidate cuts before deleting.
@@ -59,6 +64,7 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
   - Static loading/desktop screens: cut if `>= 3.0 s` after verifying it is not an intentional cutscene/dialogue moment.
 
 ### 2.4 Transitions & Subtle SFX on Time-Jump Cuts
+
 - Apply on adjacent clips where a genuine time jump occurred (using post-cut `clip` UUID of the **outgoing** clip):
   ```json
   {
@@ -77,6 +83,7 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
 - Pair time-jump transitions with a subtle `whoosh` from Drift `sfx` (`quota: null`, e.g. category `motion/whoosh`) placed on an `Audio 4` SFX lane at `cut_time - 0.12 s` at `volume: 0.35–0.45` with `set_fade` (`in: 0.03, out: 0.08`).
 
 ### 2.5 Copyright Music Muting (Preserving Dialogue)
+
 - Use `set_keyframes` on the separated audio clip's `volume` property:
   ```json
   {
@@ -103,6 +110,7 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
   - Never mute speech/dialogue or confirmed safe game score. For uncertain instrumental tracks, leave unmuted, place `add_bookmark`, and document in `edit_report.md`.
 
 ### 2.6 Free To Use Music Fill & Driving Auto-Ducking
+
 - **Marketplace rules:**
   - Use **only** `stock.music` (`provider: "freetouse"`, `quota: null`) and `sfx` (`quota: null`).
   - **Avoid** `stock.audio` and `stock.video` (daily quota of `1–3/day`).
@@ -134,45 +142,52 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
     (Pass `over_clips: [...]` if dialogue spans multiple audio lanes.)
 
 ### 2.7 Cold Open Teaser, Jump-Cut Pacing & SEO/CTR Chapters
+
 - **Optional Cold Open (`0:00–0:15`):** Place a short teaser of the session's highest-tension non-spoiler moment right at `0:00` (avoiding graphic blood/violence in the opening `7 s`), followed by a brief `dip`/`crossfade` into the main match.
 - **Jump-Cut Pacing on Slow Stretches:** When footage has low-action traversal or quiet exploration without strong highlights, mark/cut dead pauses with clean jump cuts (keeping dialogue intact) rather than adding flashy effects.
 - **SEO & CTR Chapters (`chapters.txt`):** Replace generic `"Part N"` titles with concise, clickable event-based titles (`MM:SS` or `H:MM:SS`) reflecting real game missions, fights, or twists from the transcript.
 
 ---
 
-## 3. Mode B — Vertical Reels / Shorts / TikTok (`9:16`, `> 60 s`) Recipes
+## 3. Mode B — Vertical Reels / Shorts / TikTok (`9:16`, Canonical `ClipsParte2` Preset)
 
-> **Always check schemas first:** Run `toolbox` on `project`, `subtitles`, `text`, `scene`, and `auto_reframe` / `detect_faces` / `set_track` / `add_bookmark` on the active Drift build before building `apply` batches.
+> **Always check schemas first:** Run `toolbox` on `project`, `subtitles`, `text`, `scene`, `effects`, and `auto_reframe` / `detect_faces` / `set_track` / `add_bookmark` on the active Drift build before building `apply` batches.
+> **Long footage `activity` rule:** Drift enforces `end - start <= 3600` and `peaks <= 30`. Split `activity` calls into `<= 3600 s` spans on videos over 1 hour and merge them before running `find-highlights`.
 
-### 3.1 Canvas Setup & Vertical 9:16 Framing (`1080×1920`)
-1. Switch canvas to `1080×1920` via `set_project_setup` and inspect representative frames with `capture` + `detect_faces` before choosing the vertical framing mode:
-   - **`solo_juego` — Blurred Full-Frame Stack (default for pure gameplay / cutscenes):**
-     - Background video lane: scale to fill full `1920 px` vertical height (`scale 1.78` for clean 16:9, or **`scale ~4.5`** if 21:9 cutscenes contain baked black letterbox bars so no dark bars repeat top/bottom) + `builtin.effects.gaussian_blur` (`u_blurRadius: ~40`), `opacity: ~0.72`, **`volume: 0.0`** over dark background (`set_background({kind: "color", color: "#ff0b0b12"})`).
-     - Foreground gameplay lane (above background): center-fit (`scaleX: 1.15..1.20, scaleY: 1.15..1.20`, `positionX: 540, positionY: 960`). On `1080×1920`, a `1920×1080` clip at `scale: 1.0` renders at `1080×607.5 px` (fit-width), so `scale: 1.18` fills `~717 px` centered vertically, leaving crisp blurred headroom and lower caption space.
+### 3.1 Canvas Setup & Canonical `solo_juego` 9:16 Stack (`1080×1920`)
+
+1. Switch canvas to `1080×1920 @ 30 fps` via `set_project_setup` and `set_background({kind: "color", color: "#ff0b0b12"})`, then inspect representative frames with `frames` / `capture` + `detect_faces` before choosing the vertical framing mode:
+   - **`solo_juego` — Blurred Full-Frame Stack (canonical `ClipsParte2` default for pure gameplay / cutscenes):**
+     - Background video lane (`Video 1`): **`scaleX: 4.5, scaleY: 4.5`** (eliminates baked 21:9 letterbox bars across both gameplay and cutscenes uniformly) + `builtin.effects.gaussian_blur` (**`u_blurRadius: 42`**), **`opacity: 0.72`**, **`volume: 0.0`**, fades `in: 0.12, out: 0.15` (`equalPower`) over `#ff0b0b12`.
+     - Foreground gameplay lane (`Video 2`, above background): center-fit (**`scaleX: 1.18, scaleY: 1.18`**, `positionX: 540, positionY: 960`, `opacity: 1.0`, fades `in: 0.12, out: 0.15` `equalPower`), leaving crisp blurred headroom and lower caption space.
    - **`facecam` — Streamer Cam + Gameplay Split (when `detect_faces` / `frames` shows a fixed corner camera):**
      - Crop/position the corner facecam cleanly across the upper third (`1080×640`) and the gameplay across the lower two-thirds (`1080×1280`), horizontally offset away from the facecam corner so the camera never duplicates inside the gameplay box. Save the camera crop layout per streamer channel.
    - **`a_camara` — Speaker Vertical Crop (talking-head / reaction full frame):**
      - Use `detect_faces` + `auto_reframe` (`crop` to `9:16` following the face).
 
-### 3.2 Highlight Extraction (`>= 5` Clips `60–90 s`, or `3–5` Micro-Clips `30–60 s`)
-1. Run Drift `activity` and `detect_scenes` (`list_scenes` for shot boundaries/scores).
-2. Run `drift_gameplay_cli.py transcribe --full --model small --device auto --vad-filter` (with 16 kHz `.f32`/PCM audio via `ffmpeg`) to capture accurate word-level timestamps across the full source.
-3. Run `drift_gameplay_cli.py find-highlights --audio-f32 ./out/audio_full.f32 --min-dur 60 --max-dur 90 --min-count 5` (or `--min-dur 30 --max-dur 60 --min-count 3 --max-count 5` when the user wants short TikTok micro-clips), combining robust Median/MAD audio energy z-scores, transcript hype/laughter/gaming cues, `activity`, and `scenes`, placing peaks near `~65–70 %` of each window.
-4. **Curate via `highlights.md`:** Read every candidate's full preview before cutting. Verify exact `[HH:MM:SS] - [HH:MM:SS]` In/Out boundaries and confirm each clip delivers: **Hook (`0–3 s`) -> Setup -> Rising Tension / Climax -> Payoff or Cliffhanger**. Drop silent stretches or repeated ambient/radio lines; avoid graphic violence/blood in the first `7 s` and avoid unmuted copyright radio.
-5. Slice and separate the selected highlights cleanly on the timeline (`2.0 s` gaps optional) with one `add_bookmark` per Reel `#1..#N` (`Reel #N (XXs) - <Topic>`).
+### 3.2 Highlight Extraction (`5` Curated Clips `60–90 s`, or `3–5` Micro-Clips `30–60 s`)
 
-### 3.3 Clean Editing Discipline & Subtle Reel-Entry Accent Only
+1. Run Drift `activity` (`<= 3600 s` chunks, `peaks: 30`) and `detect_scenes` (`list_scenes` for shot boundaries/scores).
+2. Run `drift_gameplay_cli.py transcribe --full --model small --device auto --vad-filter` (with 16 kHz `.f32`/PCM audio via `ffmpeg`) to capture accurate word-level timestamps across the full source.
+3. Run `drift_gameplay_cli.py find-highlights --audio-f32 ./out/audio_full.f32 --min-dur 60 --max-dur 90 --min-count 5 --max-count 8` (or `--min-dur 30 --max-dur 60 --min-count 3 --max-count 5` when the user explicitly requests short TikTok micro-clips), combining robust Median/MAD audio energy z-scores, transcript hype/laughter/gaming cues, `activity`, and `scenes`, placing peaks near `~65–70 %` of each window.
+4. **Curate top `5` via `highlights.md`:** Read every candidate's full preview before cutting. Pick the strongest **`5`** clips with exact `[HH:MM:SS] - [HH:MM:SS]` In/Out boundaries confirming: **Hook (`0–3 s`) -> Setup -> Rising Tension / Climax -> Payoff or Cliffhanger**. Drop silent stretches, repetitive ambient/radio lines, unmuted copyright songs, and avoid graphic violence/blood in the first `7 s`.
+5. Place the curated `5` highlights separated by **`2.0 s` gaps** on the timeline with one `add_bookmark` per Reel at `tl_start` (`Reel #N (XXs) - <Short Title>`).
+
+### 3.3 Clean Editing Discipline, Subtle Reel-Entry Accent & `utility.limiter` Audio
+
 > **Editorial Focus:** Keep the body of every Reel distraction-free. Do **not** spam `camera_shake`, `camera_punch`, mid-clip `zoom_pulse`, or impact hits across dialogue.
 
-- **Boundary micro-fades:** Apply clean `equalPower` micro-fades on foreground clips (`set_fade({in: 0.10..0.15, out: 0.15..0.20})`, `set_fade_curve({curve: "equalPower"})`) to eliminate audio/visual snaps.
+- **Boundary micro-fades:** Apply `set_fade({in: 0.12, out: 0.15})` and `set_fade_curve({curve: "equalPower", edge: "both"})` on foreground and background Reel clips.
 - **Entry accent only (`0.0–0.85 s` of each Reel):**
-  - Gentle `set_keyframes` settle on `scaleX` / `scaleY` (`interpolation: "smooth"`) right at the Reel's start — e.g. from `[tl_start, base * 1.06]` smoothly to `[tl_start + 0.85, base]` (or `[tl_start, base]` -> `[tl_start + 0.35, base * 1.05]` -> `[tl_start + 0.85, base]`), with no further zoom keyframes later in the Reel.
-  - Optional subtle zero-quota `whoosh` (`stock` `sfx` with `quota: null`, e.g. trimmed `0.45–0.75 s`) placed once at `tl_start` on a dedicated bottom `SFX` audio lane (`volume: 0.35–0.40`, `set_fade` `in: 0.02, out: 0.08`, `equalPower`).
+  - Gentle `set_keyframes` settle (`interpolation: "smooth"`, `replace: true`) on foreground `scaleX` / `scaleY`: `[tl_start, 1.25] -> [tl_start + 0.85, 1.18]` (for `solo_juego` base `1.18`, or `base * 1.06 -> base`), with no further zoom keyframes later in the Reel.
+  - Zero-quota **`01_woosh.flac`** (`source: "sfx"`, catalog id `aa47d9f251567c87`, trimmed **`in: 0.35, out: 0.95` = `0.60 s`**) placed once at each Reel's `tl_start` on bottom `Audio 1` (`volume: 0.35`, `set_fade` `in: 0.02, out: 0.15`, `equalPower`).
 - **Internal sub-cuts (only if a Reel stitches two moments):** Clean cut or brief `crossfade` (`0.20–0.25 s`, no flashy swirl/shake effects).
-- **Audio loudness target:** Verify/normalize foreground dialogue/gameplay near `~ −14 LUFS` (`TP <= −1.5 dBTP`) via `audio_measure` / `normalize_volume` after arranging clips.
+- **Audio loudness & peak protection (`utility.limiter` + `audio_measure`):** Keep foreground `volume: 1.0` (do **not** raise post-limiter clip `volume > 1.0`) and boost via `add_audio_effect({effect: "utility.limiter"})` setting `ceiling: 0.81..0.84` (`<= -1.4 dBTP`) and `drive` (`1.4..2.3` per Reel depending on dialogue level). Measure every Reel individually with `audio_measure`, targeting **`-14 .. -16.5 LUFS`**, **`TP <= -1.25 dBTP`**, and `0` clipping. Save `./out/inspect_reels_arranged.json`.
 
 ### 3.4 Dual EN/ES Native Karaoke Subtitles & Strict 9:16 Safe Zones (`apply-reel-subs` Option C)
+
 > **Strict 9:16 Safe Zone Box (`1080×1920`):**
+>
 > - **Top `12 %` (`y <= 230`):** Reserved for search bar / Follow / platform header.
 > - **Bottom `20 %` (`y >= 1536`):** Reserved for TikTok/Reels captions, audio ticker, and handle.
 > - **Right `15 %` (`x >= 918`):** Reserved for Like, Comment, Save, and Share icons — enforce short line lengths (`--max-chars-per-cue 24`) centered at `x = 540` so lines never approach `x = 918`.

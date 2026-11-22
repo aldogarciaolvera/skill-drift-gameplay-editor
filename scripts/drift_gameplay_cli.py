@@ -1043,7 +1043,13 @@ def cmd_detect_music(args: argparse.Namespace) -> int:
 def _load_windows(windows_file: str | Path) -> list[dict[str, Any]]:
     data = read_json_auto(windows_file)
     if isinstance(data, dict):
-        raw_list = data.get("music_windows") or data.get("windows") or data.get("proposed_mute_windows") or []
+        raw_list = (
+            data.get("music_windows")
+            or data.get("windows")
+            or data.get("highlights")
+            or data.get("proposed_mute_windows")
+            or []
+        )
     elif isinstance(data, list):
         raw_list = data
     else:
@@ -1904,16 +1910,28 @@ def cmd_find_highlights(args: argparse.Namespace) -> int:
         for pk in act.get("peaks", []):
             t = float(pk.get("t", pk.get("time", -1)))
             if 0 <= int(t) < n_bins:
-                visual_energy[int(t)] = max(visual_energy[int(t)], min(1.0, float(pk.get("change", 30.0)) / 60.0))
+                chg = float(pk.get("content", pk.get("change", 30.0)))
+                visual_energy[int(t)] = max(visual_energy[int(t)], min(1.0, chg / 60.0))
                 audio_energy[int(t)] = max(audio_energy[int(t)], float(pk.get("audio", 0.5)))
         for idx_s, sample in enumerate(act.get("samples", [])):
             if isinstance(sample, dict):
                 t = float(sample.get("t", idx_s))
                 if 0 <= int(t) < n_bins:
-                    visual_energy[int(t)] = max(
-                        visual_energy[int(t)], min(1.0, float(sample.get("change", 0.0)) / 50.0)
-                    )
+                    chg = float(sample.get("content", sample.get("change", 0.0)))
+                    visual_energy[int(t)] = max(visual_energy[int(t)], min(1.0, chg / 50.0))
                     audio_energy[int(t)] = max(audio_energy[int(t)], float(sample.get("audio", 0.0)))
+        if not act.get("samples") and (act.get("content") or act.get("audio")):
+            st0 = float(act.get("start", 0.0))
+            step0 = float(act.get("step", 1.0)) or 1.0
+            au_arr = act.get("audio") or []
+            co_arr = act.get("content") or []
+            for idx_s in range(max(len(au_arr), len(co_arr))):
+                t = st0 + idx_s * step0
+                if 0 <= int(t) < n_bins:
+                    if idx_s < len(co_arr):
+                        visual_energy[int(t)] = max(visual_energy[int(t)], min(1.0, float(co_arr[idx_s]) / 50.0))
+                    if idx_s < len(au_arr):
+                        audio_energy[int(t)] = max(audio_energy[int(t)], float(au_arr[idx_s]))
 
     if args.scenes_file:
         sc = read_json_auto(args.scenes_file)

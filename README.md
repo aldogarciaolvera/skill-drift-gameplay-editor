@@ -8,15 +8,15 @@ Soporta dos modos de edición:
    - Detecta y recorta menús de pausa, pantallas de carga/escritorio y mapas largos manteniendo el audio/video sincronizado (`ripple: true`).
    - Aplica transiciones sutiles (`crossfade` / `dip`) y SFX `whoosh` en saltos temporales.
    - Detecta música con copyright mediante YAMNet + Whisper y mutea **solo** los tramos sin diálogo ni score propio del juego (`set_keyframes` en `volume`).
-   - Descarga o reutiliza música *Free To Use* de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y rellena los espacios muteados **y tramos de conducción sin radio** (con auto-ducking `duck_under` debajo de diálogos).
+   - Descarga o reutiliza música _Free To Use_ de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y rellena los espacios muteados **y tramos de conducción sin radio** (con auto-ducking `duck_under` debajo de diálogos).
    - Marca casos dudosos con `add_bookmark` y genera `youtube_credits.txt`, `chapters.txt` y `edit_report.md`.
 
-2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, `60–90 s` o `30–60 s`):**
+2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, configuración canónica `ClipsParte2`):**
    - Pensado para editar clips verticales limpios desde gameplay ya editado o crudo (o generar primero una hoja editorial completa desde transcripción).
-   - Cambia el lienzo a `1080×1920`, elige el encuadre vertical (`solo_juego` con fondo desenfocado sin barras negras, `facecam` arriba/juego abajo, o `a_camara` vía `auto_reframe`).
-   - Analiza audio (`z` robusta mediana/MAD), actividad, escenas y transcripción (`find-highlights`) generando `highlights.md` (`[HH:MM:SS] - [HH:MM:SS]`, Hook 0–3 s, Planteamiento → Nudo → Desenlace) para curación humana y extracción de al menos **5 clips narrativos de `60–90 s`** (o `3–5` de `30–60 s`) con clímax hacia ~65–70 % del clip.
-   - Mantiene la edición limpia (sin spam de efectos ni sacudidas en mitad del diálogo): aplica **únicamente un acento/whoosh sutil de entrada al inicio de cada Reel**, respeta **Safe Zones estrictas** (`≥20 %` inferior y `≥15 %` derecha) y normaliza cerca de `−14 LUFS`.
-   - Genera e importa **dos pistas independientes de subtítulos nativos karaoke palabra a palabra** (`Subtitles ES` y `Subtitles EN` con jerga gamer natural), ocultando una para exportar fácilmente ambas versiones.
+   - Cambia el lienzo a `1080×1920 @ 30 fps`, aplica por defecto el layout `solo_juego` (`scale 1.18` centrado sobre fondo duplicado con `gaussian_blur` `u_blurRadius: 42`, `scale: 4.5` sin barras negras, `opacity: 0.72` y `volume: 0.0` sobre `#ff0b0b12`), o bien `facecam` arriba/juego abajo o `a_camara` vía `auto_reframe`.
+   - Analiza audio (`z` robusta mediana/MAD), actividad, escenas y transcripción (`find-highlights`) generando `highlights.md` (`[HH:MM:SS] - [HH:MM:SS]`, Hook 0–3 s, Planteamiento → Nudo → Desenlace) para curar **5 clips narrativos de `60–90 s`** separados por `2.0 s` con clímax hacia ~65–70 % del clip.
+   - Mantiene la edición limpia (sin spam de efectos ni sacudidas en mitad del diálogo): aplica **únicamente acento sutil de entrada al inicio de cada Reel** (`0.0–0.85 s`: zoom suave `1.25 -> 1.18` + `01_woosh.flac` `0.35–0.95 s` a `volume: 0.35` con `equalPower`), nivela audio con `utility.limiter` (`ceiling: 0.86`, `−14 .. −16.5 LUFS`, `TP <= −1.25 dBTP`) y respeta **Safe Zones estrictas** (`≥20 %` inferior, `≥15 %` derecha, `≥12 %` superior).
+   - Genera e importa **dos pistas independientes de subtítulos nativos karaoke palabra a palabra** (`Track 0` Español visible y `Track 1` Inglés oculta, fuente `Anton` 64 px amarillo `#ffffd400` en `y=1435`) listas para alternar y exportar ambas tandas.
 
 ---
 
@@ -171,5 +171,5 @@ uv run --no-project python -m unittest discover -s tests -v
 
 ## Notas sobre Cuotas y Licencias
 
-- **Drift Marketplace:** La skill utiliza únicamente `stock.music` (proveedor *Free To Use*, sin límite diario) y `sfx` (sin límite diario), evitando `stock.audio` y `stock.video`.
-- **Créditos en YouTube:** Si usas pistas de *Free To Use*, recuerda pegar el contenido generado en `youtube_credits.txt` dentro de la descripción de tu video en YouTube.
+- **Drift Marketplace:** La skill utiliza únicamente `stock.music` (proveedor _Free To Use_, sin límite diario) y `sfx` (sin límite diario), evitando `stock.audio` y `stock.video`.
+- **Créditos en YouTube:** Si usas pistas de _Free To Use_, recuerda pegar el contenido generado en `youtube_credits.txt` dentro de la descripción de tu video en YouTube.
