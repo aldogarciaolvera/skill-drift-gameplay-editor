@@ -9,7 +9,7 @@ Soporta dos modos de edición:
    - Aplica transiciones sutiles (`crossfade` / `dip`) y SFX `whoosh` en saltos temporales.
    - Detecta música con copyright mediante YAMNet + Whisper y mutea **solo** los tramos sin diálogo ni score propio del juego (`set_keyframes` en `volume`).
    - Descarga o reutiliza música _Free To Use_ de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y rellena los espacios muteados **y tramos de conducción sin radio** (con auto-ducking `duck_under` debajo de diálogos).
-   - Marca casos dudosos con `add_bookmark` y genera `youtube_credits.txt`, `chapters.txt` y `edit_report.md`.
+   - Marca casos dudosos con `add_bookmark` y genera **siempre** `youtube_credits.txt` (créditos listos para YouTube), `chapters.txt` (capítulos SEO/CTR desde `00:00`) y `edit_report.md`, incluso en ediciones manuales, sin música externa o desde transcripción.
 
 2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, configuración canónica `ClipsParte2`):**
    - Pensado para editar clips verticales limpios desde gameplay ya editado o crudo (o generar primero una hoja editorial completa desde transcripción).
@@ -144,9 +144,10 @@ uv run scripts/drift_gameplay_cli.py detect-music --video "./video.mp4" --keep-f
 uv run scripts/drift_gameplay_cli.py transcribe --audio ./out/audio.f32 --windows-file ./out/music.json --model small --device auto --output ./out/transcript.json
 uv run scripts/drift_gameplay_cli.py transcribe --audio "./edited.mp4" --full --model small --device auto --output ./out/full_transcript.json
 
-# 5. Planificar lotes apply y entregables para YouTube
+# 5. Planificar lotes apply y entregables obligatorios para YouTube (chapters + credits)
 uv run scripts/drift_gameplay_cli.py plan-youtube --stage cuts --inspect-file ./out/inspect.json --pauses-file ./out/pauses.json --out-dir ./out/plan
-uv run scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post.json --pauses-file ./out/pauses.json --music-file ./out/music.json --transcript-file ./out/transcript.json --fill-assets-file ./out/fill_assets.json --out-dir ./out/plan
+uv run scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post.json --pauses-file ./out/pauses.json --music-file ./out/music.json --transcript-file ./out/transcript.json --fill-assets-file ./out/fill_assets.json --game "<Juego>" --out-dir ./out/plan
+uv run scripts/drift_gameplay_cli.py plan-youtube --stage meta --inspect-file ./out/inspect_post.json --transcript-file ./out/full_transcript.json --fill-assets-file ./out/fill_assets.json --game "<Juego>" --out-dir ./out/plan
 
 # 6. Detectar >= 5 highlights (>60 s) y generar highlights.md para curación (entrada limpia por defecto)
 uv run scripts/drift_gameplay_cli.py find-highlights --transcript-file ./out/full_transcript.json --audio-f32 ./out/audio.f32 --activity-file ./out/activity.json --min-dur 60 --min-count 5 --output ./out/highlights.json
@@ -172,4 +173,4 @@ uv run --no-project python -m unittest discover -s tests -v
 ## Notas sobre Cuotas y Licencias
 
 - **Drift Marketplace:** La skill utiliza únicamente `stock.music` (proveedor _Free To Use_, sin límite diario) y `sfx` (sin límite diario), evitando `stock.audio` y `stock.video`.
-- **Créditos en YouTube:** Si usas pistas de _Free To Use_, recuerda pegar el contenido generado en `youtube_credits.txt` dentro de la descripción de tu video en YouTube.
+- **Créditos y Capítulos en YouTube:** En Modo A se generan **siempre** `chapters.txt` (`00:00` + `>= 3` capítulos SEO/CTR) y `youtube_credits.txt` (juego, fuente VOD si aplica y atribuciones exactas de _Free To Use_, o nota de audio original si no se añadió música). Pega ambos bloques directamente en la descripción de YouTube.

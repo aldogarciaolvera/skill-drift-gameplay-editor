@@ -141,11 +141,19 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
     ```
     (Pass `over_clips: [...]` if dialogue spans multiple audio lanes.)
 
-### 2.7 Cold Open Teaser, Jump-Cut Pacing & SEO/CTR Chapters
+### 2.7 Cold Open Teaser, Jump-Cut Pacing & Mandatory YouTube Chapters / Credits
 
 - **Optional Cold Open (`0:00–0:15`):** Place a short teaser of the session's highest-tension non-spoiler moment right at `0:00` (avoiding graphic blood/violence in the opening `7 s`), followed by a brief `dip`/`crossfade` into the main match.
 - **Jump-Cut Pacing on Slow Stretches:** When footage has low-action traversal or quiet exploration without strong highlights, mark/cut dead pauses with clean jump cuts (keeping dialogue intact) rather than adding flashy effects.
-- **SEO & CTR Chapters (`chapters.txt`):** Replace generic `"Part N"` titles with concise, clickable event-based titles (`MM:SS` or `H:MM:SS`) reflecting real game missions, fights, or twists from the transcript.
+- **Mandatory SEO & CTR Chapters (`chapters.txt`, ALWAYS required in Mode A):**
+  - **Every** Mode A edit or Transcript-Only plan must output `chapters.txt` (and a ready-to-paste `Chapters` block in the final response). If `plan-youtube --stage post-cuts` was skipped (e.g., manual edits, zero cuts/mutes, or Transcript-Only Fallback), run `plan-youtube --stage meta` (`--inspect-file` and/or `--transcript-file`, `--fill-assets-file`, `--game`, `--creator`, `--out-dir`).
+  - **YouTube validation rules:** First timestamp MUST be `00:00`, include **at least `3` chapters** (whenever duration `>= 30 s`), keep timestamps strictly ascending on the **final post-cut timeline** (`0 <= t < total_dur`), and space consecutive chapters at least **`10 s` apart** (`>= 45 s` preferred for long gameplay pacing; scale sensibly on multi-hour VODs rather than emitting 50 micro-chapters).
+  - **Never deliver placeholders:** Replace every `[SEO/CTR Event Title]` draft marker with concise, clickable event titles grounded in the transcript/bookmarks (e.g. `00:00 Cold Open: Emboscada en el muelle`, `04:35 Primer robo sin alarmas`, `12:18 Escape en autopista contra la policía`).
+- **Mandatory YouTube Description Credits (`youtube_credits.txt`, ALWAYS required in Mode A):**
+  - Always generate `youtube_credits.txt` (and a ready-to-paste `Credits` block in the final response), whether or not external music was added:
+    - **Game & Source:** Include `- Game: <Title>` and `- Gameplay / VOD Source: <Channel>` (mandatory when editing another creator's stream/VOD with permission).
+    - **Music Credits (`Free To Use / CutWire Drift`):** List exact `license.attribution` (`Title by Artist (freetouse.com)`) + `license.url` from `market_item` for every Free To Use track present on the final timeline; if zero external tracks were added, state explicitly `- Original in-game audio & commentary only (no external Free To Use music tracks added).`
+    - **SFX Credits:** Note Drift quota-free SFX if used (`CutWire Drift SFX (quota-free)` or explicit attribution).
 
 ---
 

@@ -6,7 +6,7 @@ description: >-
   16:9 gameplay (technical breakdown, optional 0:00-0:15 cold open teaser,
   pause/dead-screen cuts and jump-cut pacing, copyright-radio muting
   preserving dialogue, Free-To-Use music fill + driving ducking, bookmarks, and
-  SEO/CTR YouTube chapters + credits), and (2) Vertical 9:16 Reels/TikTok/Shorts
+  mandatory SEO/CTR YouTube chapters + copy-pasteable credits), and (2) Vertical 9:16 Reels/TikTok/Shorts
   (60-90s narrative highlights by default or 30-60s micro-clips, Hook -> Setup
   -> Climax -> Payoff, clean 9:16 gameplay/facecam framing, subtle Reel-entry
   accent only, strict 9:16 Safe Zones, and native EN/ES karaoke subtitles with
@@ -50,12 +50,14 @@ Always read [references/drift-workflows.md](./references/drift-workflows.md) for
 
 Inspect `inspect_initial.json` and confirm the workflow mode with the user (or follow the user's explicit request):
 
-- **Mode A — Long Gameplay (YouTube 16:9):** Multi-clip or raw long gameplay needing pause/loading/dead-screen cuts, copyright music detection & muting (preserving dialogue), Free To Use music replacement + driving auto-ducking, clean transitions, bookmarks, and YouTube credits/chapters.
+- **Mode A — Long Gameplay (YouTube 16:9):** Multi-clip or raw long gameplay needing pause/loading/dead-screen cuts, copyright music detection & muting (preserving dialogue), Free To Use music replacement + driving auto-ducking, clean transitions, bookmarks, and **mandatory** YouTube chapters + credits (always generated for every Mode A edit or plan).
 - **Mode B — Vertical Reels / Shorts / TikTok (`9:16`, `> 60 s`):** Designed for a project loaded with gameplay (already edited or raw stream/capture). Converts canvas to `1080×1920`, extracts **`5` canonical narrative highlights (`60–90 s`)** with peak near `~65–70 %` of the clip, applies the **`ClipsParte2` verified `solo_juego` layout** (foreground `scale: 1.18` centered over `scale: 4.5` `u_blurRadius: 42` `opacity: 0.72` muted background over `#ff0b0b12`), **`0.0–0.85 s` subtle entry accent only** (`1.25 -> 1.18` smooth zoom settle + `01_woosh.flac` `0.35–0.95 s` at `volume: 0.35`), **`utility.limiter` + `audio_measure` (`−14 .. −16.5 LUFS`, `TP <= −1.25 dBTP`)**, and dual `Subtitles ES` (`Track 0` visible) + `Subtitles EN` (`Track 1` hidden) tracks ready for toggling and export.
 
 ---
 
 ## Mode A — Long Gameplay (YouTube 16:9)
+
+> **Mandatory Mode A rule (Chapters + Credits ALWAYS):** **Every** Mode A run — whether full Drift MCP edit, partial polish pass without cuts/music fill, manual batch session, or Transcript-Only Fallback planning — **MUST ALWAYS** generate and deliver both **YouTube Chapters** (`chapters.txt` + ready-to-paste block) and **YouTube Credits** (`youtube_credits.txt` + ready-to-paste block). Never skip them even when zero pauses are cut or zero external Free To Use music tracks are added.
 
 ### Step 1: Inspect & Separate Linked Audio
 
@@ -92,6 +94,7 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
 1. Check `list_assets` in `inspect` first to reuse any tracks/SFX already in the bin.
 2. Search/install **only** from `stock.music` (`provider: "freetouse"`, `quota: null`) and `sfx` (`quota: null`, e.g. subtle `motion/whoosh` only for real time-jump cuts). **Never** spend `stock.audio` or `stock.video` quotas.
 3. Call `market_item` for each selected track to obtain exact `license.attribution` (`Title by Artist (freetouse.com)`) and `license.url`, install with `market_install({"source":"stock.music","id":...,"wait":120})`, and save track metadata (`id`, `title`, `artist`, `attribution`, `license_url`, `dur`, `volume`, `mood`) into `fill_assets.json`. Target `~ -22..-24 LUFS` for background music under `~ -14 LUFS` dialogue/gameplay.
+4. If **no** external Free To Use music tracks are added (e.g., original in-game score/commentary only), still record the **Game** title, any **Gameplay / VOD Source** channel credit (per creator permission rules), and any Drift SFX used so `youtube_credits.txt` is always complete.
 
 ### Step 5: Plan & Apply in Phased Batches (`dry_run` First)
 
@@ -106,12 +109,21 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
    ```
    Dry-run then apply `batch_1b_delete_cuts.json`.
 3. **Re-inspect:** Capture post-cut timeline state `./out/inspect_post_cuts.json`.
-4. **Stage 2 (`post-cuts`):** Generate subtle time-jump transitions (`crossfade`/`dip`, `0.25–0.35 s`), monotonic `set_keyframes` volume mutes (`0.15 s` linear ramps), `Audio 3` Free To Use fills (both muted gaps and driving-without-radio ranges with `duck_under`), `Audio 4` subtle time-jump `whoosh` SFX, review `add_bookmark` markers (including optional `0:00–0:15` Cold Open teaser hook and jump-cut notes for slow pacing stretches), plus `youtube_credits.txt`, SEO/CTR-oriented `chapters.txt` (`[HH:MM:SS]` / `MM:SS`), and `edit_report.md`:
+4. **Stage 2 (`post-cuts`):** Generate subtle time-jump transitions (`crossfade`/`dip`, `0.25–0.35 s`), monotonic `set_keyframes` volume mutes (`0.15 s` linear ramps), `Audio 3` Free To Use fills (both muted gaps and driving-without-radio ranges with `duck_under`), `Audio 4` subtle time-jump `whoosh` SFX, review `add_bookmark` markers (including optional `0:00–0:15` Cold Open teaser hook and jump-cut notes for slow pacing stretches), plus `youtube_credits.txt`, SEO/CTR-oriented `chapters.txt` (`00:00` / `MM:SS` / `H:MM:SS`), and `edit_report.md`:
    ```powershell
-   uv run ./scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post_cuts.json --pauses-file ./out/pauses_manifest.json --music-file ./out/music_manifest.json --transcript-file ./out/transcript_manifest.json --fill-assets-file ./out/fill_assets.json --driving-ranges-file ./out/driving_ranges.json --out-dir ./out/plan
+   uv run ./scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post_cuts.json --pauses-file ./out/pauses_manifest.json --music-file ./out/music_manifest.json --transcript-file ./out/transcript_manifest.json --fill-assets-file ./out/fill_assets.json --driving-ranges-file ./out/driving_ranges.json --game "<Game Title>" --out-dir ./out/plan
    ```
    Dry-run and apply `batch_2_transitions_mutes.json` and `batch_3_music_sfx.json` in separate undo steps.
-5. **Verify:** Run `audio_measure` across muted gaps, dialogue transitions, and ducked driving sections (`~ -14 LUFS` master / `~ -22..-24 LUFS` BGM, zero clipping), replace generic chapter labels in `chapters.txt` with high-CTR event titles, check visual seams with `frames`, and present `youtube_credits.txt`, `chapters.txt`, and `edit_report.md`.
+   _(Pass full transcript JSON to `--transcript-file` whenever available so chapter generation sees all narrative milestones, not only music windows.)_
+5. **Verify & Finalize Mandatory Chapters + Credits:**
+   - Run `audio_measure` across muted gaps, dialogue transitions, and ducked driving sections (`~ -14 LUFS` master / `~ -22..-24 LUFS` BGM, zero clipping) and inspect visual seams with `frames`.
+   - **If `plan-youtube --stage post-cuts` was not run** (e.g., manual Drift edits, zero pause cuts/mutes needed, or Transcript-Only Fallback), generate `chapters.txt`, `youtube_credits.txt`, and `edit_report.md` via:
+     ```powershell
+     uv run ./scripts/drift_gameplay_cli.py plan-youtube --stage meta --inspect-file ./out/inspect_post_cuts.json --transcript-file ./out/full_transcript.json --fill-assets-file ./out/fill_assets.json --game "<Game Title>" --out-dir ./out/plan
+     ```
+     _(Omit `--inspect-file` when planning from `--transcript-file` only.)_
+   - **Mandatory `chapters.txt` polish (YouTube rules):** Ensure timestamps are in **final post-cut timeline coordinates** (`0 <= t < total_dur`), start at `00:00`, include **at least `3` chapters** (for videos `>= 30 s`) spaced **`>= 10 s` apart** (`>= 45 s` preferred for long videos), and replace **all** draft/placeholder labels (`[SEO/CTR Event Title]`) with concise, high-CTR event titles grounded in the transcript/bookmarks (matching the creator's language).
+   - **Mandatory `youtube_credits.txt` verification:** Confirm it is a clean, ready-to-paste YouTube description block listing Game title, `Gameplay / VOD Source` (if editing another creator's stream), exact `license.attribution` + `license.url` for every Free To Use track on the final timeline (or an explicit original-audio note if no external BGM was added), and any Drift SFX note. Present `chapters.txt`, `youtube_credits.txt`, and `edit_report.md` plus copy-pasteable `Chapters` and `Credits` blocks in the final response.
 
 ---
 
@@ -181,7 +193,7 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
 Present results clearly using this editorial structure alongside all generated files/timeline state:
 
 1. **Ficha Técnica del Metraje:** Game, total duration, creator tone, and major narrative milestones.
-2. **Hoja de Ruta para Video Largo (YouTube 16:9, if Mode A or planning):** Optional `0:00–0:15` Cold Open hook, pause/jump-cut summary, audio/BGM mix notes, and SEO/CTR chapter table (`[HH:MM:SS]`).
+2. **Hoja de Ruta y Entregables para Video Largo (YouTube 16:9 — Obligatorio en Modo A y planeación):** Optional `0:00–0:15` Cold Open hook, pause/jump-cut summary, audio/BGM mix notes, **mandatory ready-to-paste YouTube Chapters** (`chapters.txt`, starting at `00:00` with `>= 3` SEO/CTR chapters spaced `>= 10 s` apart), and **mandatory ready-to-paste YouTube Credits** (`youtube_credits.txt`, Game/VOD source + exact Free To Use attributions & license URLs or original-audio note). Always include both copy-pasteable `Chapters` and `Credits` blocks directly in the final response alongside the generated files (`chapters.txt`, `youtube_credits.txt`, `edit_report.md`).
 3. **Matriz de Clips Verticales (Reels/TikTok/Shorts 9:16, if Mode B or planning):** For each Clip `#1..#N`: title, exact `In/Out` (`[HH:MM:SS] - [HH:MM:SS]`), narrative reason (`Hook 0–3 s`, `Setup -> Climax -> Payoff`), framing layout (`solo_juego` / `facecam` / `a_camara`), and bilingual ES/EN subtitle files (`reels_es.srt`, `reels_en.srt`, plus `reel_subs_manifest.json` / Drift track toggles).
 
 ---

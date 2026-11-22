@@ -1350,11 +1350,323 @@ def _pick_fill_track(
     return fill_tracks[idx_hint % len(fill_tracks)]
 
 
+def _collect_timeline_speech_segments(
+    vclips: Sequence[dict[str, Any]],
+    transcript_list: Sequence[dict[str, Any]],
+    total_dur: float,
+) -> list[tuple[float, float, str]]:
+    """Map Whisper transcript segments into post-cut timeline coordinates."""
+    if not transcript_list:
+        return []
+
+    mapped: list[tuple[float, float, str]] = []
+    if vclips:
+        for clip in vclips:
+            in_pt = float(clip["inPoint"])
+            out_pt = float(clip["outPoint"])
+            for t_doc in transcript_list:
+                if not _clip_matches_source(clip, t_doc):
+                    continue
+                for seg in t_doc.get("segments", []):
+                    txt = str(seg.get("text", "")).strip()
+                    if not txt or float(seg.get("no_speech_prob", 0.5)) >= 0.70:
+                        continue
+                    sa, sb = float(seg["start"]), float(seg["end"])
+                    if sb <= in_pt or sa >= out_pt:
+                        continue
+                    ca, cb = max(in_pt, sa), min(out_pt, sb)
+                    if cb > ca:
+                        mapped.append((round(_src_to_tl(clip, ca), 3), round(_src_to_tl(clip, cb), 3), txt))
+
+        # Single-source fallback (e.g., .f32 extracted from the sole source video)
+        unique_assets = {c.get("assetId") or c.get("path") or c.get("name") for c in vclips}
+        if not mapped and len(transcript_list) == 1 and len(unique_assets) <= 1:
+            t_doc = transcript_list[0]
+            t_dur = float(t_doc.get("duration_sec") or 0.0)
+            max_out = max(float(c["outPoint"]) for c in vclips)
+            if t_dur > 0.0 and abs(t_dur - total_dur) <= 2.5 and max_out > total_dur + 2.5:
+                for seg in t_doc.get("segments", []):
+                    txt = str(seg.get("text", "")).strip()
+                    if not txt or float(seg.get("no_speech_prob", 0.5)) >= 0.70:
+                        continue
+                    sa, sb = max(0.0, float(seg["start"])), min(total_dur, float(seg["end"]))
+                    if sb > sa:
+                        mapped.append((round(sa, 3), round(sb, 3), txt))
+            else:
+                for clip in vclips:
+                    in_pt, out_pt = float(clip["inPoint"]), float(clip["outPoint"])
+                    for seg in t_doc.get("segments", []):
+                        txt = str(seg.get("text", "")).strip()
+                        if not txt or float(seg.get("no_speech_prob", 0.5)) >= 0.70:
+                            continue
+                        sa, sb = float(seg["start"]), float(seg["end"])
+                        if sb <= in_pt or sa >= out_pt:
+                            continue
+                        ca, cb = max(in_pt, sa), min(out_pt, sb)
+                        if cb > ca:
+                            mapped.append((round(_src_to_tl(clip, ca), 3), round(_src_to_tl(clip, cb), 3), txt))
+    else:
+        for t_doc in transcript_list:
+            for seg in t_doc.get("segments", []):
+                txt = str(seg.get("text", "")).strip()
+                if not txt or float(seg.get("no_speech_prob", 0.5)) >= 0.70:
+                    continue
+                sa, sb = max(0.0, float(seg["start"])), float(seg["end"])
+                if total_dur > 0.0:
+                    sb = min(total_dur, sb)
+                if sb > sa:
+                    mapped.append((round(sa, 3), round(sb, 3), txt))
+
+    mapped.sort(key=lambda item: item[0])
+    return mapped
+
+
+def _collect_existing_used_tracks(
+    inspect_data: dict[str, Any],
+    vclips: Sequence[dict[str, Any]],
+    fill_tracks: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Collect Free To Use music tracks already present on secondary audio lanes in inspect_data."""
+    video_asset_ids = {c.get("assetId") for c in vclips if c.get("assetId")}
+    linked_audio_ids: set[str] = set()
+    for vc in vclips:
+        linked = _find_linked_audio(inspect_data, vc)
+        if linked and linked.get("id"):
+            linked_audio_ids.add(str(linked["id"]))
+
+    fill_by_id = {str(t["id"]): t for t in fill_tracks if t.get("id")}
+    fill_by_title = {str(t.get("title", "")).strip().lower(): t for t in fill_tracks if t.get("title")}
+    assets_by_id: dict[str, dict[str, Any]] = {}
+    for asset in inspect_data.get("assets", []) or []:
+        if isinstance(asset, dict):
+            aid = asset.get("id") or asset.get("assetId")
+            if aid:
+                assets_by_id[str(aid)] = asset
+
+    found: dict[str, dict[str, Any]] = {}
+    for tr in inspect_data.get("tracks", []):
+        if tr.get("type") != "audio":
+            continue
+        for item in tr.get("items", []):
+            if str(item.get("id", "")) in linked_audio_ids:
+                continue
+            aid = str(item.get("assetId") or "")
+            if aid and aid in video_asset_ids:
+                continue
+            name_key = str(item.get("name") or item.get("title") or "").strip().lower()
+            if aid and aid in fill_by_id:
+                found[aid] = fill_by_id[aid]
+                continue
+            if name_key and name_key in fill_by_title:
+                tr_meta = fill_by_title[name_key]
+                found[str(tr_meta.get("id") or name_key)] = tr_meta
+                continue
+            asset_meta = assets_by_id.get(aid)
+            if not asset_meta:
+                continue
+            lic = asset_meta.get("license") if isinstance(asset_meta.get("license"), dict) else {}
+            provider = str(asset_meta.get("provider") or "").lower()
+            source = str(asset_meta.get("source") or "").lower()
+            attrib = asset_meta.get("attribution") or lic.get("attribution")
+            if provider == "freetouse" or source == "stock.music" or attrib:
+                found[aid] = {
+                    "id": aid,
+                    "title": asset_meta.get("title") or asset_meta.get("name") or item.get("name") or "Track",
+                    "artist": asset_meta.get("artist") or "Artist",
+                    "attribution": attrib,
+                    "license_url": asset_meta.get("license_url") or lic.get("url") or "https://freetouse.com/license",
+                }
+    return found
+
+
+def _speech_snippet_at(
+    speech_tl: Sequence[tuple[float, float, str]],
+    t_sec: float,
+    lookahead_sec: float = 28.0,
+    max_chars: int = 56,
+) -> str:
+    """Return a clean short speech snippet starting near t_sec for chapter authoring context."""
+    parts: list[str] = []
+    for sa, sb, txt in speech_tl:
+        if sb >= t_sec - 1.5 and sa <= t_sec + lookahead_sec:
+            cleaned = re.sub(r"\s+", " ", txt).strip()
+            if cleaned:
+                parts.append(cleaned)
+            if sum(len(p) for p in parts) >= max_chars:
+                break
+    joined = " ".join(parts).strip()
+    if not joined:
+        return ""
+    if len(joined) <= max_chars:
+        return joined
+    cut = joined[:max_chars].rsplit(" ", 1)[0].strip()
+    return (cut or joined[:max_chars]).rstrip(",;:") + "..."
+
+
+def _build_youtube_chapters(
+    vclips: Sequence[dict[str, Any]],
+    inspect_data: dict[str, Any],
+    speech_tl: Sequence[tuple[float, float, str]],
+    total_dur: float,
+    min_chapter_sec: float = 45.0,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Build YouTube-compliant chapters (>=3 entries for >=30s, starting at 00:00, >=10s apart)."""
+    if total_dur <= 0.0:
+        intro = "Intro / Cold Open (0:00-0:15 Teaser -> Match Start)"
+        return [f"00:00 {intro}"], [{"time": 0.0, "timestamp": "00:00", "label": intro, "source": "start"}]
+
+    base_min = max(10.0, float(min_chapter_sec))
+    eff_min = max(10.0, min(base_min, total_dur / 4.0)) if total_dur < base_min * 4.0 else base_min
+    auto_min = max(eff_min, total_dur / 14.0) if total_dur >= 600.0 else eff_min
+    max_chapters = 15
+
+    # Gather candidate interior anchors: (time_sec, priority, source_kind, explicit_label, fallback_name)
+    candidates: list[tuple[float, float, str, str, str]] = []
+    for bm in inspect_data.get("bookmarks", []) or []:
+        if not isinstance(bm, dict):
+            continue
+        raw_lbl = str(bm.get("label") or bm.get("title") or "").strip()
+        if not raw_lbl or raw_lbl.upper().startswith("REVIEW_"):
+            continue
+        t_bm = float(bm.get("at", bm.get("time", -1.0)))
+        if 10.0 <= t_bm <= total_dur - 10.0:
+            if raw_lbl.upper().startswith("CHAPTER:"):
+                clean_lbl = raw_lbl.split(":", 1)[1].strip()
+                candidates.append((round(t_bm, 3), 4.0, "bookmark", clean_lbl, ""))
+            else:
+                candidates.append((round(t_bm, 3), 3.0, "bookmark", raw_lbl, ""))
+
+    for clip in vclips[1:]:
+        t_start = float(clip.get("start", 0.0))
+        if 10.0 <= t_start <= total_dur - 10.0:
+            candidates.append((round(t_start, 3), 2.0, "seam", "", str(clip.get("name") or "Segment")))
+
+    for idx_s in range(1, len(speech_tl)):
+        prev_end = speech_tl[idx_s - 1][1]
+        cur_start = speech_tl[idx_s][0]
+        if cur_start - prev_end >= 3.0 and 10.0 <= cur_start <= total_dur - 10.0:
+            candidates.append((round(cur_start, 3), 1.5, "speech_shift", "", "Narrative Shift"))
+
+    # Select priority anchors respecting spacing rules
+    selected: list[dict[str, Any]] = [
+        {"time": 0.0, "priority": 5.0, "source": "start", "label": "", "fallback": "Intro / Cold Open"}
+    ]
+    candidates.sort(key=lambda item: (-item[1], item[0]))
+    for t_cand, prio, kind, lbl, fb in candidates:
+        if prio < 3.0 and len(selected) >= max_chapters:
+            continue
+        req_gap = 10.0 if prio >= 3.0 else auto_min
+        if any(abs(t_cand - s["time"]) < req_gap for s in selected):
+            continue
+        selected.append({"time": t_cand, "priority": prio, "source": kind, "label": lbl, "fallback": fb})
+
+    # Ensure >=3 YouTube chapters on >=30s videos (or >=2 on 20..30s videos) even for 1-clip footage
+    min_needed = 3 if total_dur >= 30.0 else (2 if total_dur >= 20.0 else 1)
+    while len(selected) < min_needed:
+        selected.sort(key=lambda s: s["time"])
+        bounds = [s["time"] for s in selected] + [total_dur]
+        best_gap = -1.0
+        best_span: tuple[float, float] | None = None
+        for idx_b in range(len(bounds) - 1):
+            a_t, b_t = bounds[idx_b], bounds[idx_b + 1]
+            # Keep >= 10s from neighbors and >= 10s before end
+            max_upper = min(b_t - 10.0, total_dur - 10.0)
+            min_lower = a_t + 10.0
+            if max_upper >= min_lower and (b_t - a_t) > best_gap:
+                best_gap = b_t - a_t
+                best_span = (min_lower, max_upper)
+        if not best_span:
+            break
+        lo, hi = best_span
+        mid = 0.5 * (lo + hi)
+        snap_rad = min(15.0, 0.25 * (hi - lo))
+        best_t = mid
+        best_dist = snap_rad + 1e-6
+        for sa, _, _ in speech_tl:
+            if lo <= sa <= hi:
+                d = abs(sa - mid)
+                if d < best_dist:
+                    best_dist = d
+                    best_t = sa
+        selected.append(
+            {
+                "time": round(best_t, 3),
+                "priority": 0.5,
+                "source": "milestone",
+                "label": "",
+                "fallback": "Gameplay Milestone",
+            }
+        )
+
+    selected.sort(key=lambda s: s["time"])
+    lines: list[str] = []
+    chapters_meta: list[dict[str, Any]] = []
+    for idx, ch in enumerate(selected, start=1):
+        t_val = float(ch["time"])
+        ts = "00:00" if t_val <= 0.0 else format_youtube_timestamp(t_val)
+        snippet = _speech_snippet_at(speech_tl, t_val)
+        if idx == 1:
+            base_title = "Intro / Cold Open (0:00-0:15 Teaser -> Match Start)"
+            line = f"{ts} {base_title}"
+        elif ch["label"]:
+            base_title = ch["label"]
+            line = f"{ts} {base_title}"
+        else:
+            ctx = snippet or ch["fallback"] or "Segment"
+            base_title = f"Chapter {idx} - [SEO/CTR Event Title] ({ctx})"
+            line = f"{ts} {base_title}"
+        lines.append(line)
+        chapters_meta.append(
+            {
+                "time": round(t_val, 3),
+                "timestamp": ts,
+                "label": base_title,
+                "source": ch["source"],
+                "context": snippet,
+            }
+        )
+    return lines, chapters_meta
+
+
+def _build_youtube_credits(
+    used_tracks: dict[str, dict[str, Any]],
+    game: str | None = None,
+    creator: str | None = None,
+    sfx_used: dict[str, Any] | str | None = None,
+) -> list[str]:
+    """Build a complete, ready-to-paste YouTube description credits block."""
+    game_txt = game.strip() if game and game.strip() else "[Game Title]"
+    lines = [
+        "YouTube Description Credits:",
+        f"- Game: {game_txt}",
+    ]
+    if creator and creator.strip():
+        lines.append(f"- Gameplay / VOD Source: {creator.strip()}")
+    lines.extend(["", "Music Credits (Free To Use / CutWire Drift):"])
+    if used_tracks:
+        for tr in used_tracks.values():
+            attrib = tr.get("attribution") or f"{tr.get('title', 'Track')} by {tr.get('artist', 'Artist')} (freetouse.com)"
+            lurl = tr.get("license_url") or "https://freetouse.com/license"
+            lines.append(f"- {attrib} | License: {lurl}")
+    else:
+        lines.append("- Original in-game audio & commentary only (no external Free To Use music tracks added).")
+    if sfx_used:
+        sfx_attrib = sfx_used.get("attribution") if isinstance(sfx_used, dict) else None
+        lines.extend(["", "Audio SFX Credits:"])
+        lines.append(f"- {sfx_attrib}" if sfx_attrib else "- CutWire Drift SFX (quota-free)")
+    return lines
+
+
 def cmd_plan_youtube(args: argparse.Namespace) -> int:
     """Plan phased Drift apply batches, YouTube credits, chapters, and edit report."""
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    inspect_data = read_json_auto(args.inspect_file)
+    if args.stage != "meta" and not args.inspect_file:
+        raise ValueError(f"--inspect-file is required when --stage={args.stage}.")
+    if args.stage == "meta" and not args.inspect_file and not args.transcript_file:
+        raise ValueError("--stage=meta requires --inspect-file and/or --transcript-file.")
+
+    inspect_data = read_json_auto(args.inspect_file) if args.inspect_file else {}
     pauses_list = _load_manifest_by_asset(args.pauses_file)
     music_list = _load_manifest_by_asset(args.music_file)
     transcript_list = _load_manifest_by_asset(args.transcript_file)
@@ -1481,121 +1793,15 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
         return 0
 
     # ------------------------------------------------------------------
-    # Stage: post-cuts / all (transitions, volume mutes, music fill, SFX, reports)
+    # Stage: post-cuts / meta / all (batches + mandatory YouTube chapters & credits)
     # ------------------------------------------------------------------
     ops_2: list[dict[str, Any]] = []
     ops_3: list[dict[str, Any]] = []
     bookmarks_added: list[dict[str, Any]] = []
     time_jump_cuts: list[float] = []
-
-    # 1. Transitions on video time jumps
-    for i in range(len(vclips) - 1):
-        cur_c = vclips[i]
-        nxt_c = vclips[i + 1]
-        cur_end = float(cur_c["start"]) + float(cur_c["duration"])
-        abutting = abs(float(nxt_c["start"]) - cur_end) <= 0.08
-        same_asset_jump = (
-            cur_c.get("assetId") == nxt_c.get("assetId")
-            and abs(float(nxt_c["inPoint"]) - float(cur_c["outPoint"])) > 0.5
-        )
-        diff_asset_seam = cur_c.get("assetId") != nxt_c.get("assetId")
-        if abutting and (same_asset_jump or diff_asset_seam):
-            ops_2.append(
-                {
-                    "tool": "add_transition",
-                    "args": {
-                        "clip": cur_c["id"],
-                        "kind": args.transition_kind,
-                        "duration": round(float(args.transition_dur), 3),
-                        "linked_audio": True,
-                    },
-                }
-            )
-            time_jump_cuts.append(round(cur_end, 3))
-
-    # 2. Dialogue protection from Whisper transcripts + Copyright mute keyframes
     muted_tl_intervals: list[tuple[float, float]] = []
     muted_summary: list[dict[str, Any]] = []
 
-    for clip in vclips:
-        a_clip = _find_linked_audio(inspect_data, clip)
-        if not a_clip:
-            continue
-
-        # Collect speech windows in source space from Whisper if provided
-        whisper_speech_src: list[tuple[float, float]] = []
-        for t_doc in transcript_list:
-            if _clip_matches_source(clip, t_doc):
-                for seg in t_doc.get("segments", []):
-                    if (
-                        float(seg.get("no_speech_prob", 1.0)) < 0.55
-                        and float(seg.get("avg_logprob", -2.0)) > -1.0
-                        and len(seg.get("text", "").strip()) >= 3
-                    ):
-                        whisper_speech_src.append(
-                            (max(0.0, float(seg["start"]) - 0.35), float(seg["end"]) + 0.35)
-                        )
-
-        mute_src_intervals: list[tuple[float, float]] = []
-        for m_doc in music_list:
-            if not _clip_matches_source(clip, m_doc):
-                continue
-            for mw in m_doc.get("proposed_mute_windows", []):
-                mute_src_intervals.append((float(mw["start"]), float(mw["end"])))
-            for rw in m_doc.get("review_windows", []):
-                rs, re_ = float(rw["start"]), float(rw["end"])
-                if float(clip["inPoint"]) <= rs <= float(clip["outPoint"]):
-                    tl_r = round(_src_to_tl(clip, rs), 3)
-                    bookmarks_added.append(
-                        {"at": tl_r, "label": f"REVIEW_MUSIC ({rw['duration']:.1f}s)", "reason": rw.get("reason", "")}
-                    )
-
-        for p_doc in pauses_list:
-            if not _clip_matches_source(clip, p_doc):
-                continue
-            for rc in p_doc.get("review_candidates", []):
-                rs = float(rc["start"])
-                if float(clip["inPoint"]) <= rs <= float(clip["outPoint"]):
-                    tl_r = round(_src_to_tl(clip, rs), 3)
-                    bookmarks_added.append(
-                        {"at": tl_r, "label": f"REVIEW_{str(rc.get('kind', 'CUT')).upper()}", "reason": rc.get("reason", "")}
-                    )
-
-        # Refine mute intervals against Whisper dialogue guard
-        if whisper_speech_src and mute_src_intervals:
-            mute_src_intervals = subtract_intervals(mute_src_intervals, whisper_speech_src, min_len=1.5)
-
-        # Map onto clip timeline bounds
-        clip_mutes_tl: list[tuple[float, float]] = []
-        in_pt, out_pt = float(clip["inPoint"]), float(clip["outPoint"])
-        for ma, mb in mute_src_intervals:
-            oa, ob = max(ma, in_pt), min(mb, out_pt)
-            if ob - oa >= 1.5:
-                ta, tb = round(_src_to_tl(clip, oa), 3), round(_src_to_tl(clip, ob), 3)
-                clip_mutes_tl.append((ta, tb))
-                muted_tl_intervals.append((ta, tb))
-                muted_summary.append({"clip": a_clip["id"], "tl_start": ta, "tl_end": tb, "dur": round(tb - ta, 2)})
-
-        if clip_mutes_tl:
-            a_start = float(a_clip["start"])
-            a_end = a_start + float(a_clip["duration"])
-            keys = _build_volume_keyframes(clip_mutes_tl, a_start, a_end, fade_sec=float(args.fade_sec))
-            ops_2.append(
-                {
-                    "tool": "set_keyframes",
-                    "args": {
-                        "clip": a_clip["id"],
-                        "interpolation": "linear",
-                        "replace": True,
-                        "keys": {"volume": keys},
-                    },
-                }
-            )
-
-    for bm in bookmarks_added:
-        ops_2.append({"tool": "add_bookmark", "args": {"at": bm["at"], "label": bm["label"]}})
-
-    # 3. Free To Use Music Fill (Audio 3) & Driving Auto-Ducking + SFX (Audio 4)
     fill_tracks: list[dict[str, Any]] = []
     sfx_whoosh: dict[str, Any] | None = None
     if isinstance(fill_assets_raw, dict):
@@ -1604,161 +1810,300 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
     elif isinstance(fill_assets_raw, list):
         fill_tracks = fill_assets_raw
 
-    driving_tl: list[tuple[float, float]] = []
-    raw_drv = driving_raw.get("ranges", driving_raw) if isinstance(driving_raw, dict) else driving_raw
-    for dr in raw_drv or []:
-        if isinstance(dr, dict) and "start" in dr and "end" in dr:
-            driving_tl.append((float(dr["start"]), float(dr["end"])))
-        elif isinstance(dr, (list, tuple)) and len(dr) >= 2:
-            driving_tl.append((float(dr[0]), float(dr[1])))
-
-    used_tracks: dict[str, dict[str, Any]] = {}
+    used_tracks: dict[str, dict[str, Any]] = _collect_existing_used_tracks(inspect_data, vclips, fill_tracks)
     music_fill_segments: list[dict[str, Any]] = []
+    sfx_used: dict[str, Any] | str | None = None
 
-    if fill_tracks and (muted_tl_intervals or driving_tl):
-        # Determine target audio lane index (place first clip on new Audio 3 lane)
-        existing_tracks = inspect_data.get("tracks", [])
-        audio3_idx = len(existing_tracks)
-        for tr in existing_tracks:
-            if tr.get("type") == "audio" and "3" in str(tr.get("label", "")):
-                audio3_idx = int(tr["i"])
-                break
-
-        # Combine muted gaps (priority) and uncovered driving intervals
-        muted_merged = merge_intervals(muted_tl_intervals, max_gap=0.4)
-        driving_only = subtract_intervals(merge_intervals(driving_tl, max_gap=1.0), muted_merged, min_len=3.0)
-        all_fills: list[tuple[float, float, bool]] = [(a, b, False) for a, b in muted_merged] + [
-            (a, b, True) for a, b in driving_only
-        ]
-        all_fills.sort(key=lambda x: x[0])
-
-        # Maintain continuous playback cursor per track id so music flows within scenes
-        track_cursor: dict[str, float] = {}
-        need_new_track = audio3_idx >= len(existing_tracks)
-        if need_new_track:
-            ops_3.append({"tool": "add_track", "args": {"type": "audio"}})
-            # add_track prepends at index 0, shifting existing tracks down by +1;
-            # therefore target track 0 for newly prepended Audio lane!
-            target_music_track = 0
-        else:
-            target_music_track = audio3_idx
-
-        # Primary dialogue track index (shifts by any prepended audio lanes)
-        audio_tracks = [t for t in existing_tracks if t.get("type") == "audio"]
-        base_dialogue_track = int(audio_tracks[0]["i"]) if audio_tracks else 1
-        extra_audio_tracks = (1 if need_new_track else 0) + (1 if (sfx_whoosh and time_jump_cuts) else 0)
-        dialogue_track_post = base_dialogue_track + extra_audio_tracks
-
-        for seg_idx, (a, b, is_driving) in enumerate(all_fills):
-            rem_start, rem_end = a, b
-            while rem_end - rem_start >= 1.5:
-                tr_meta = _pick_fill_track(
-                    fill_tracks,
-                    rem_start,
-                    rem_end - rem_start,
-                    hint_mood="driving" if is_driving else None,
-                    idx_hint=seg_idx,
-                )
-                tid = tr_meta["id"]
-                tdur = float(tr_meta.get("dur", 150.0))
-                cursor = track_cursor.get(tid, 4.0)
-                if cursor >= tdur - 4.0:
-                    cursor = 4.0
-                avail = tdur - cursor
-                piece_dur = min(rem_end - rem_start, avail)
-                piece_end = round(rem_start + piece_dur, 3)
-                s_in = round(cursor, 3)
-                s_out = round(cursor + piece_dur, 3)
-                track_cursor[tid] = s_out
-
-                used_tracks[tid] = tr_meta
-                music_fill_segments.append(
+    if args.stage in ("post-cuts", "all"):
+        # 1. Transitions on video time jumps
+        for i in range(len(vclips) - 1):
+            cur_c = vclips[i]
+            nxt_c = vclips[i + 1]
+            cur_end = float(cur_c["start"]) + float(cur_c["duration"])
+            abutting = abs(float(nxt_c["start"]) - cur_end) <= 0.08
+            same_asset_jump = (
+                cur_c.get("assetId") == nxt_c.get("assetId")
+                and abs(float(nxt_c["inPoint"]) - float(cur_c["outPoint"])) > 0.5
+            )
+            diff_asset_seam = cur_c.get("assetId") != nxt_c.get("assetId")
+            if abutting and (same_asset_jump or diff_asset_seam):
+                ops_2.append(
                     {
-                        "tl_start": round(rem_start, 3),
-                        "tl_end": piece_end,
-                        "track_title": tr_meta.get("title", tid),
-                        "in": s_in,
-                        "out": s_out,
-                        "volume": float(tr_meta.get("volume", 0.30)),
-                        "driving_duck": is_driving,
+                        "tool": "add_transition",
+                        "args": {
+                            "clip": cur_c["id"],
+                            "kind": args.transition_kind,
+                            "duration": round(float(args.transition_dur), 3),
+                            "linked_audio": True,
+                        },
                     }
                 )
+                time_jump_cuts.append(round(cur_end, 3))
+
+        # 2. Dialogue protection from Whisper transcripts + Copyright mute keyframes
+        for clip in vclips:
+            a_clip = _find_linked_audio(inspect_data, clip)
+            if not a_clip:
+                continue
+
+            # Collect speech windows in source space from Whisper if provided
+            whisper_speech_src: list[tuple[float, float]] = []
+            for t_doc in transcript_list:
+                if _clip_matches_source(clip, t_doc):
+                    for seg in t_doc.get("segments", []):
+                        if (
+                            float(seg.get("no_speech_prob", 1.0)) < 0.55
+                            and float(seg.get("avg_logprob", -2.0)) > -1.0
+                            and len(seg.get("text", "").strip()) >= 3
+                        ):
+                            whisper_speech_src.append(
+                                (max(0.0, float(seg["start"]) - 0.35), float(seg["end"]) + 0.35)
+                            )
+
+            mute_src_intervals: list[tuple[float, float]] = []
+            for m_doc in music_list:
+                if not _clip_matches_source(clip, m_doc):
+                    continue
+                for mw in m_doc.get("proposed_mute_windows", []):
+                    mute_src_intervals.append((float(mw["start"]), float(mw["end"])))
+                for rw in m_doc.get("review_windows", []):
+                    rs, _ = float(rw["start"]), float(rw["end"])
+                    if float(clip["inPoint"]) <= rs <= float(clip["outPoint"]):
+                        tl_r = round(_src_to_tl(clip, rs), 3)
+                        bookmarks_added.append(
+                            {"at": tl_r, "label": f"REVIEW_MUSIC ({rw['duration']:.1f}s)", "reason": rw.get("reason", "")}
+                        )
+
+            for p_doc in pauses_list:
+                if not _clip_matches_source(clip, p_doc):
+                    continue
+                for rc in p_doc.get("review_candidates", []):
+                    rs = float(rc["start"])
+                    if float(clip["inPoint"]) <= rs <= float(clip["outPoint"]):
+                        tl_r = round(_src_to_tl(clip, rs), 3)
+                        bookmarks_added.append(
+                            {
+                                "at": tl_r,
+                                "label": f"REVIEW_{str(rc.get('kind', 'CUT')).upper()}",
+                                "reason": rc.get("reason", ""),
+                            }
+                        )
+
+            # Refine mute intervals against Whisper dialogue guard
+            if whisper_speech_src and mute_src_intervals:
+                mute_src_intervals = subtract_intervals(mute_src_intervals, whisper_speech_src, min_len=1.5)
+
+            # Map onto clip timeline bounds
+            clip_mutes_tl: list[tuple[float, float]] = []
+            in_pt, out_pt = float(clip["inPoint"]), float(clip["outPoint"])
+            for ma, mb in mute_src_intervals:
+                oa, ob = max(ma, in_pt), min(mb, out_pt)
+                if ob - oa >= 1.5:
+                    ta, tb = round(_src_to_tl(clip, oa), 3), round(_src_to_tl(clip, ob), 3)
+                    clip_mutes_tl.append((ta, tb))
+                    muted_tl_intervals.append((ta, tb))
+                    muted_summary.append({"clip": a_clip["id"], "tl_start": ta, "tl_end": tb, "dur": round(tb - ta, 2)})
+
+            if clip_mutes_tl:
+                a_start = float(a_clip["start"])
+                a_end = a_start + float(a_clip["duration"])
+                keys = _build_volume_keyframes(clip_mutes_tl, a_start, a_end, fade_sec=float(args.fade_sec))
+                ops_2.append(
+                    {
+                        "tool": "set_keyframes",
+                        "args": {
+                            "clip": a_clip["id"],
+                            "interpolation": "linear",
+                            "replace": True,
+                            "keys": {"volume": keys},
+                        },
+                    }
+                )
+
+        for bm in bookmarks_added:
+            ops_2.append({"tool": "add_bookmark", "args": {"at": bm["at"], "label": bm["label"]}})
+
+        # 3. Free To Use Music Fill (Audio 3) & Driving Auto-Ducking + SFX (Audio 4)
+        driving_tl: list[tuple[float, float]] = []
+        raw_drv = driving_raw.get("ranges", driving_raw) if isinstance(driving_raw, dict) else driving_raw
+        for dr in raw_drv or []:
+            if isinstance(dr, dict) and "start" in dr and "end" in dr:
+                driving_tl.append((float(dr["start"]), float(dr["end"])))
+            elif isinstance(dr, (list, tuple)) and len(dr) >= 2:
+                driving_tl.append((float(dr[0]), float(dr[1])))
+
+        if fill_tracks and (muted_tl_intervals or driving_tl):
+            existing_tracks = inspect_data.get("tracks", [])
+            audio3_idx = len(existing_tracks)
+            for tr in existing_tracks:
+                if tr.get("type") == "audio" and "3" in str(tr.get("label", "")):
+                    audio3_idx = int(tr["i"])
+                    break
+
+            muted_merged = merge_intervals(muted_tl_intervals, max_gap=0.4)
+            driving_only = subtract_intervals(merge_intervals(driving_tl, max_gap=1.0), muted_merged, min_len=3.0)
+            all_fills: list[tuple[float, float, bool]] = [(a, b, False) for a, b in muted_merged] + [
+                (a, b, True) for a, b in driving_only
+            ]
+            all_fills.sort(key=lambda x: x[0])
+
+            track_cursor: dict[str, float] = {}
+            need_new_track = audio3_idx >= len(existing_tracks)
+            if need_new_track:
+                ops_3.append({"tool": "add_track", "args": {"type": "audio"}})
+                target_music_track = 0
+            else:
+                target_music_track = audio3_idx
+
+            audio_tracks = [t for t in existing_tracks if t.get("type") == "audio"]
+            base_dialogue_track = int(audio_tracks[0]["i"]) if audio_tracks else 1
+            extra_audio_tracks = (1 if need_new_track else 0) + (1 if (sfx_whoosh and time_jump_cuts) else 0)
+            dialogue_track_post = base_dialogue_track + extra_audio_tracks
+
+            for seg_idx, (a, b, is_driving) in enumerate(all_fills):
+                rem_start, rem_end = a, b
+                while rem_end - rem_start >= 1.5:
+                    tr_meta = _pick_fill_track(
+                        fill_tracks,
+                        rem_start,
+                        rem_end - rem_start,
+                        hint_mood="driving" if is_driving else None,
+                        idx_hint=seg_idx,
+                    )
+                    tid = tr_meta["id"]
+                    tdur = float(tr_meta.get("dur", 150.0))
+                    cursor = track_cursor.get(tid, 4.0)
+                    if cursor >= tdur - 4.0:
+                        cursor = 4.0
+                    avail = tdur - cursor
+                    piece_dur = min(rem_end - rem_start, avail)
+                    piece_end = round(rem_start + piece_dur, 3)
+                    s_in = round(cursor, 3)
+                    s_out = round(cursor + piece_dur, 3)
+                    track_cursor[tid] = s_out
+
+                    used_tracks[tid] = tr_meta
+                    music_fill_segments.append(
+                        {
+                            "tl_start": round(rem_start, 3),
+                            "tl_end": piece_end,
+                            "track_title": tr_meta.get("title", tid),
+                            "in": s_in,
+                            "out": s_out,
+                            "volume": float(tr_meta.get("volume", 0.30)),
+                            "driving_duck": is_driving,
+                        }
+                    )
+                    ops_3.append(
+                        {
+                            "tool": "insert_clip",
+                            "args": {
+                                "asset": tid,
+                                "track": target_music_track,
+                                "at": round(rem_start, 3),
+                                "in": s_in,
+                                "out": s_out,
+                                "ripple": False,
+                            },
+                        }
+                    )
+                    rem_start = piece_end
+
+            ops_3_notes = {
+                "post_insert_instructions": (
+                    "After executing batch_3_music_sfx.json, read done[].result.id from the apply output "
+                    "and apply set_volume, set_fade (in/out ~0.25s), set_fade_curve (equalPower/both), "
+                    f"and duck_under (over_track={dialogue_track_post}, amount=0.25) on driving segments."
+                ),
+                "music_fill_segments": music_fill_segments,
+            }
+            write_json(out_dir / "music_fill_metadata.json", ops_3_notes)
+
+        if sfx_whoosh and time_jump_cuts:
+            sfx_id = sfx_whoosh["id"] if isinstance(sfx_whoosh, dict) else str(sfx_whoosh)
+            sfx_dur = float(sfx_whoosh.get("dur", 0.8)) if isinstance(sfx_whoosh, dict) else 0.8
+            sfx_used = sfx_whoosh
+            ops_3.append({"tool": "add_track", "args": {"type": "audio"}})
+            for t_cut in time_jump_cuts:
+                at_t = max(0.0, round(t_cut - min(0.15, sfx_dur * 0.3), 3))
                 ops_3.append(
                     {
                         "tool": "insert_clip",
                         "args": {
-                            "asset": tid,
-                            "track": target_music_track,
-                            "at": round(rem_start, 3),
-                            "in": s_in,
-                            "out": s_out,
+                            "asset": sfx_id,
+                            "track": 0,
+                            "at": at_t,
+                            "in": 0.0,
+                            "out": round(min(sfx_dur, 0.55), 3),
                             "ripple": False,
                         },
                     }
                 )
-                rem_start = piece_end
 
-        ops_3_notes = {
-            "post_insert_instructions": (
-                "After executing batch_3_music_sfx.json, read done[].result.id from the apply output "
-                "and apply set_volume, set_fade (in/out ~0.25s), set_fade_curve (equalPower/both), "
-                f"and duck_under (over_track={dialogue_track_post}, amount=0.25) on driving segments."
-            ),
-            "music_fill_segments": music_fill_segments,
-        }
-        write_json(out_dir / "music_fill_metadata.json", ops_3_notes)
+        write_json(out_dir / "batch_2_transitions_mutes.json", {"ops": ops_2})
+        write_json(out_dir / "batch_2_transitions_mutes_dry.json", {"ops": ops_2, "dry_run": True})
+        write_json(out_dir / "batch_3_music_sfx.json", {"ops": ops_3})
+        write_json(out_dir / "batch_3_music_sfx_dry.json", {"ops": ops_3, "dry_run": True})
+    else:
+        # stage == "meta": fall back to all curated fill_tracks if none were matched in inspect_data
+        if not used_tracks and fill_tracks:
+            for idx_t, tr in enumerate(fill_tracks):
+                tid = str(tr.get("id") or tr.get("title") or f"track_{idx_t + 1}")
+                used_tracks[tid] = tr
+        if sfx_whoosh:
+            sfx_id = sfx_whoosh.get("id") if isinstance(sfx_whoosh, dict) else str(sfx_whoosh)
+            if not inspect_data or any(
+                str(it.get("assetId") or "") == str(sfx_id)
+                for tr in inspect_data.get("tracks", [])
+                if tr.get("type") == "audio"
+                for it in tr.get("items", [])
+            ):
+                sfx_used = sfx_whoosh
 
-    if sfx_whoosh and time_jump_cuts:
-        sfx_id = sfx_whoosh["id"] if isinstance(sfx_whoosh, dict) else str(sfx_whoosh)
-        sfx_dur = float(sfx_whoosh.get("dur", 0.8)) if isinstance(sfx_whoosh, dict) else 0.8
-        ops_3.append({"tool": "add_track", "args": {"type": "audio"}})
-        for t_cut in time_jump_cuts:
-            at_t = max(0.0, round(t_cut - min(0.15, sfx_dur * 0.3), 3))
-            ops_3.append(
-                {
-                    "tool": "insert_clip",
-                    "args": {
-                        "asset": sfx_id,
-                        "track": 0,
-                        "at": at_t,
-                        "in": 0.0,
-                        "out": round(min(sfx_dur, 0.55), 3),
-                        "ripple": False,
-                    },
-                }
+    # 4. Mandatory YouTube Credits, Chapters & Edit Report (always generated for Mode A)
+    if vclips:
+        total_tl_dur = max(float(c.get("start", 0.0)) + float(c.get("duration", 0.0)) for c in vclips)
+    else:
+        total_tl_dur = float(inspect_data.get("dur") or 0.0)
+        if total_tl_dur <= 0.0 and transcript_list:
+            total_tl_dur = max(
+                [float(t.get("duration_sec") or 0.0) for t in transcript_list]
+                + [float(seg.get("end") or 0.0) for t in transcript_list for seg in t.get("segments", [])]
+                + [0.0]
             )
 
-    write_json(out_dir / "batch_2_transitions_mutes.json", {"ops": ops_2})
-    write_json(out_dir / "batch_2_transitions_mutes_dry.json", {"ops": ops_2, "dry_run": True})
-    write_json(out_dir / "batch_3_music_sfx.json", {"ops": ops_3})
-    write_json(out_dir / "batch_3_music_sfx_dry.json", {"ops": ops_3, "dry_run": True})
-
-    # 4. YouTube Credits, Chapters & Edit Report
-    credits_lines = ["Music Credits (Free To Use / CutWire Drift):"]
-    for tr in used_tracks.values():
-        attrib = tr.get("attribution") or f"{tr.get('title', 'Track')} by {tr.get('artist', 'Artist')} (freetouse.com)"
-        lurl = tr.get("license_url") or "https://freetouse.com/license"
-        credits_lines.append(f"- {attrib} | License: {lurl}")
-    if len(credits_lines) == 1:
-        credits_lines.append("- (No external Free To Use tracks placed yet.)")
+    speech_tl = _collect_timeline_speech_segments(vclips, transcript_list, total_tl_dur)
+    credits_lines = _build_youtube_credits(
+        used_tracks,
+        game=getattr(args, "game", None),
+        creator=getattr(args, "creator", None),
+        sfx_used=sfx_used,
+    )
     write_text(out_dir / "youtube_credits.txt", "\n".join(credits_lines) + "\n")
 
-    chapter_lines = ["00:00 Intro / Cold Open (0:00-0:15 Teaser -> Match Start)"]
-    for idx, clip in enumerate(vclips[1:], start=1):
-        t_start = float(clip.get("start", 0.0))
-        if t_start >= 15.0:
-            chapter_lines.append(
-                f"{format_youtube_timestamp(t_start)} Chapter {idx + 1} - [SEO/CTR Event Title] ({clip.get('name', 'Segment')})"
-            )
+    chapter_lines, _ = _build_youtube_chapters(
+        vclips,
+        inspect_data,
+        speech_tl,
+        total_tl_dur,
+        min_chapter_sec=float(getattr(args, "min_chapter_sec", 45.0)),
+    )
     write_text(out_dir / "chapters.txt", "\n".join(chapter_lines) + "\n")
 
-    total_tl_dur = sum(float(c.get("duration", 0.0)) for c in vclips)
+    game_note = args.game.strip() if getattr(args, "game", None) and args.game.strip() else "(fill game title)"
+    creator_note = (
+        args.creator.strip()
+        if getattr(args, "creator", None) and args.creator.strip()
+        else "(original channel)"
+    )
     report = [
         "# CutWire Drift — YouTube Edit Report",
         "",
         "## Ficha Técnica",
+        f"- **Game:** {game_note}",
+        f"- **Gameplay / VOD Source:** {creator_note}",
         f"- **Timeline clips inspected:** {len(vclips)} ({format_hms_timestamp(total_tl_dur)} total)",
-        "- **Creator tone / Game notes:** (fill game title & creator tone before final delivery)",
+        "- **Creator tone / Game notes:** (fill creator tone & key narrative milestones before final delivery)",
         "- **Cold Open (00:00 - 00:15):** Optional teaser of the session's best non-spoiler peak (keep graphic violence out of first 7s).",
         "- **Pacing note:** Apply clean jump cuts on slow traversal stretches without dialogue; avoid flashy mid-clip effect spam.",
         "",
@@ -1767,6 +2112,7 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
         f"- **Copyright music mute windows:** {len(muted_summary)} ({sum(m['dur'] for m in muted_summary):.1f}s total)",
         f"- **Free To Use fill clips planned:** {len(music_fill_segments)}",
         f"- **Review bookmarks queued:** {len(bookmarks_added)}",
+        f"- **YouTube chapters drafted:** {len(chapter_lines)}",
         "",
         "## Review Bookmarks",
     ]
@@ -1775,12 +2121,14 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
             report.append(f"- `{format_youtube_timestamp(bm['at'])}` ({bm['at']}s) — **{bm['label']}**: {bm['reason']}")
     else:
         report.append("- None.")
-    report.extend(["", "## Music Credits", *credits_lines[1:]])
+    report.extend(["", "## YouTube Chapters", *(f"- `{line}`" for line in chapter_lines)])
+    report.extend(["", "## YouTube Credits", *credits_lines])
     write_text(out_dir / "edit_report.md", "\n".join(report) + "\n")
 
     print(
         f"[plan-youtube] stage={args.stage} ops2={len(ops_2)} ops3={len(ops_3)} "
-        f"mutes={len(muted_summary)} bookmarks={len(bookmarks_added)} -> {out_dir}"
+        f"chapters={len(chapter_lines)} credits_tracks={len(used_tracks)} mutes={len(muted_summary)} "
+        f"bookmarks={len(bookmarks_added)} -> {out_dir}"
     )
     return 0
 
@@ -2921,14 +3269,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # plan-youtube
     p_py = sub.add_parser("plan-youtube", help="Generate phased Drift apply batches and YouTube files.")
-    p_py.add_argument("--stage", choices=("cuts", "delete-cuts", "post-cuts", "all"), default="post-cuts")
-    p_py.add_argument("--inspect-file", required=True, help="Drift inspect({clips:true}) JSON")
+    p_py.add_argument("--stage", choices=("cuts", "delete-cuts", "post-cuts", "meta", "all"), default="post-cuts")
+    p_py.add_argument("--inspect-file", help="Drift inspect({clips:true}) JSON (required unless --stage=meta)")
     p_py.add_argument("--pauses-file", help="scan-pauses JSON or manifest list")
     p_py.add_argument("--apply-result", help="apply output JSON for --stage delete-cuts")
     p_py.add_argument("--music-file", help="detect-music JSON or manifest list")
     p_py.add_argument("--transcript-file", help="transcribe JSON or manifest list")
     p_py.add_argument("--fill-assets-file", help="JSON with Free To Use tracks and optional whoosh SFX")
     p_py.add_argument("--driving-ranges-file", help="JSON with timeline [start, end] driving spans")
+    p_py.add_argument("--game", help="Game title for YouTube credits and Ficha Técnica")
+    p_py.add_argument("--creator", help="Optional original streamer/VOD channel credit")
+    p_py.add_argument("--min-chapter-sec", type=float, default=45.0, help="Minimum chapter spacing in seconds (clamped >= 10s)")
     p_py.add_argument("--transition-kind", default="crossfade")
     p_py.add_argument("--transition-dur", type=float, default=0.30)
     p_py.add_argument("--fade-sec", type=float, default=0.15)

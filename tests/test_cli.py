@@ -322,10 +322,200 @@ class DriftGameplayCliTests(unittest.TestCase):
             self.assertEqual(len(times), len(set(times)))
             credits_txt = (out_dir / "youtube_credits.txt").read_text(encoding="utf-8")
             self.assertIn("Night Drive by Walen", credits_txt)
-            self.assertTrue((out_dir / "chapters.txt").exists())
+            self.assertIn("YouTube Description Credits:", credits_txt)
+            chapters_lines = [ln for ln in (out_dir / "chapters.txt").read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertTrue(chapters_lines[0].startswith("00:00 "))
+            self.assertGreaterEqual(len(chapters_lines), 3)
             edit_rep = (out_dir / "edit_report.md").read_text(encoding="utf-8")
             self.assertIn("Ficha Técnica", edit_rep)
             self.assertIn("Cold Open", edit_rep)
+            self.assertIn("## YouTube Chapters", edit_rep)
+            self.assertIn("## YouTube Credits", edit_rep)
+
+    def test_plan_youtube_always_generates_chapters_and_credits_in_single_clip_and_meta_modes(self) -> None:
+        def _parse_ts(ts_str: str) -> int:
+            parts = [int(p) for p in ts_str.split(":")]
+            if len(parts) == 2:
+                return parts[0] * 60 + parts[1]
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            # 1) Single-clip timeline with no Free To Use fill and no cuts -> must still output >=3 YouTube chapters + credits
+            insp_single = {
+                "dur": 180.0,
+                "tracks": [
+                    {
+                        "i": 0,
+                        "type": "video",
+                        "label": "Video 1",
+                        "items": [
+                            {
+                                "id": "vid-solo",
+                                "assetId": "asset-main",
+                                "name": "gameplay.mp4",
+                                "path": "C:/v/gameplay.mp4",
+                                "start": 0.0,
+                                "duration": 180.0,
+                                "inPoint": 0.0,
+                                "outPoint": 180.0,
+                                "speed": 1.0,
+                                "linkId": "lnk-solo",
+                            }
+                        ],
+                    },
+                    {
+                        "i": 1,
+                        "type": "audio",
+                        "label": "Audio 1",
+                        "items": [
+                            {
+                                "id": "aud-solo",
+                                "assetId": "asset-main",
+                                "name": "gameplay.mp4",
+                                "path": "C:/v/gameplay.mp4",
+                                "start": 0.0,
+                                "duration": 180.0,
+                                "inPoint": 0.0,
+                                "outPoint": 180.0,
+                                "speed": 1.0,
+                                "linkId": "lnk-solo",
+                            }
+                        ],
+                    },
+                ],
+            }
+            tr_single = {
+                "source_path": "C:/out/audio_v1.f32",
+                "duration_sec": 180.0,
+                "segments": [
+                    {"start": 2.0, "end": 8.0, "text": "Hoy empezamos el atraco sin armas.", "no_speech_prob": 0.05},
+                    {"start": 55.0, "end": 62.0, "text": "Cuidado que vienen los guardias por la derecha!", "no_speech_prob": 0.05},
+                    {"start": 122.0, "end": 130.0, "text": "Escapamos en la lancha justo a tiempo!", "no_speech_prob": 0.05},
+                ],
+            }
+            (tdp / "insp_single.json").write_text(json.dumps(insp_single), encoding="utf-8")
+            (tdp / "tr_single.json").write_text(json.dumps(tr_single), encoding="utf-8")
+
+            out_single = tdp / "plan_single"
+            rc_single = cli.main(
+                [
+                    "plan-youtube",
+                    "--stage",
+                    "post-cuts",
+                    "--inspect-file",
+                    str(tdp / "insp_single.json"),
+                    "--transcript-file",
+                    str(tdp / "tr_single.json"),
+                    "--game",
+                    "Grand Theft Auto V",
+                    "--creator",
+                    "@StreamerPrueba",
+                    "--out-dir",
+                    str(out_single),
+                ]
+            )
+            self.assertEqual(rc_single, 0)
+            ch_lines = [ln for ln in (out_single / "chapters.txt").read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertGreaterEqual(len(ch_lines), 3)
+            self.assertTrue(ch_lines[0].startswith("00:00 "))
+            times = [_parse_ts(ln.split(" ", 1)[0]) for ln in ch_lines]
+            self.assertEqual(times, sorted(times))
+            self.assertTrue(all(times[i] - times[i - 1] >= 10 for i in range(1, len(times))))
+            cr_single = (out_single / "youtube_credits.txt").read_text(encoding="utf-8")
+            self.assertIn("Grand Theft Auto V", cr_single)
+            self.assertIn("@StreamerPrueba", cr_single)
+            self.assertIn("Original in-game audio", cr_single)
+
+            # 2) --stage meta in Transcript-Only mode (no --inspect-file) with fill_assets
+            fill_meta = {
+                "tracks": [
+                    {
+                        "id": "ftu-rt",
+                        "title": "Road Trip",
+                        "artist": "HiLau",
+                        "attribution": "Road Trip by HiLau (freetouse.com)",
+                        "license_url": "https://freetouse.com/music",
+                    }
+                ]
+            }
+            (tdp / "fill_meta.json").write_text(json.dumps(fill_meta), encoding="utf-8")
+            out_meta = tdp / "plan_meta"
+            rc_meta = cli.main(
+                [
+                    "plan-youtube",
+                    "--stage",
+                    "meta",
+                    "--transcript-file",
+                    str(tdp / "tr_single.json"),
+                    "--fill-assets-file",
+                    str(tdp / "fill_meta.json"),
+                    "--game",
+                    "Cyberpunk 2077",
+                    "--out-dir",
+                    str(out_meta),
+                ]
+            )
+            self.assertEqual(rc_meta, 0)
+            self.assertFalse((out_meta / "batch_2_transitions_mutes.json").exists())
+            meta_ch = [ln for ln in (out_meta / "chapters.txt").read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertGreaterEqual(len(meta_ch), 3)
+            self.assertTrue(meta_ch[0].startswith("00:00 "))
+            meta_cr = (out_meta / "youtube_credits.txt").read_text(encoding="utf-8")
+            self.assertIn("Cyberpunk 2077", meta_cr)
+            self.assertIn("Road Trip by HiLau (freetouse.com)", meta_cr)
+            self.assertIn("https://freetouse.com/music", meta_cr)
+
+            # 3) --stage meta with inspect_data containing existing FTU clip + CHAPTER bookmark
+            insp_existing = {
+                "dur": 180.0,
+                "bookmarks": [
+                    {"at": 15.0, "label": "CHAPTER: Inicio de la misión"},
+                    {"at": 72.0, "label": "REVIEW_MUSIC (4.0s)"},
+                    {"at": 95.0, "label": "CHAPTER: Persecución policial"},
+                ],
+                "assets": [
+                    {
+                        "id": "ftu-mh",
+                        "title": "Mellow Sky",
+                        "artist": "Zambolino",
+                        "provider": "freetouse",
+                        "attribution": "Mellow Sky by Zambolino (freetouse.com)",
+                        "license": {"url": "https://freetouse.com/music"},
+                    }
+                ],
+                "tracks": [
+                    *insp_single["tracks"],
+                    {
+                        "i": 2,
+                        "type": "audio",
+                        "label": "Audio 3",
+                        "items": [{"id": "aud-bgm", "assetId": "ftu-mh", "name": "Mellow Sky", "start": 20.0, "duration": 30.0}],
+                    },
+                ],
+            }
+            (tdp / "insp_existing.json").write_text(json.dumps(insp_existing), encoding="utf-8")
+            out_existing = tdp / "plan_existing"
+            rc_ex = cli.main(
+                [
+                    "plan-youtube",
+                    "--stage",
+                    "meta",
+                    "--inspect-file",
+                    str(tdp / "insp_existing.json"),
+                    "--game",
+                    "Elden Ring",
+                    "--out-dir",
+                    str(out_existing),
+                ]
+            )
+            self.assertEqual(rc_ex, 0)
+            ex_ch_txt = (out_existing / "chapters.txt").read_text(encoding="utf-8")
+            self.assertIn("00:15 Inicio de la misión", ex_ch_txt)
+            self.assertIn("01:35 Persecución policial", ex_ch_txt)
+            self.assertNotIn("REVIEW_MUSIC", ex_ch_txt)
+            ex_cr_txt = (out_existing / "youtube_credits.txt").read_text(encoding="utf-8")
+            self.assertIn("Mellow Sky by Zambolino (freetouse.com)", ex_cr_txt)
 
     def test_robust_z_mad_detects_spike(self) -> None:
         self.assertEqual(cli.format_hms_timestamp(3665), "01:01:05")
