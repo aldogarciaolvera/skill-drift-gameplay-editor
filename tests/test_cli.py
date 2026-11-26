@@ -124,6 +124,138 @@ class DriftGameplayCliTests(unittest.TestCase):
         self.assertLess(mutes[0]["end"], 10.0)
         self.assertGreater(mutes[1]["start"], 13.0)
 
+    def test_detect_silent_and_no_music_uses_distinct_ftu_track(self) -> None:
+        # 60s timeline: 0..10 music, 10..20 silent/muted cutscene (-70 dBFS), 20..40 quiet no-music, 40..60 speech/no-music
+        times = [round(i * 0.48, 2) for i in range(125)]
+        mu = [0.8 if t <= 10.0 else 0.05 for t in times]
+        sp = [0.85 if t >= 40.0 else 0.05 for t in times]
+        si = [0.05] * len(times)
+        rms_db = [-70.0 if 10.0 <= t <= 20.0 else -20.0 for t in times]
+        res = cli.classify_music_segments(times, sp, mu, si, rms_db_scores=rms_db)
+        self.assertGreaterEqual(len(res["silent_audio_windows"]), 1)
+        self.assertAlmostEqual(res["silent_audio_windows"][0]["start"], 10.0, delta=1.5)
+        self.assertGreaterEqual(len(res["no_music_windows"]), 1)
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            insp = {
+                "dur": 120.0,
+                "tracks": [
+                    {
+                        "i": 0,
+                        "type": "video",
+                        "label": "Video 1",
+                        "items": [
+                            {
+                                "id": "v1",
+                                "assetId": "a1",
+                                "name": "gp.mp4",
+                                "path": "C:/v/gp.mp4",
+                                "start": 0.0,
+                                "duration": 120.0,
+                                "inPoint": 0.0,
+                                "outPoint": 120.0,
+                                "speed": 1.0,
+                                "linkId": "l1",
+                            }
+                        ],
+                    },
+                    {
+                        "i": 1,
+                        "type": "audio",
+                        "label": "Audio 1",
+                        "items": [
+                            {
+                                "id": "au1",
+                                "assetId": "a1",
+                                "name": "gp.mp4",
+                                "path": "C:/v/gp.mp4",
+                                "start": 0.0,
+                                "duration": 120.0,
+                                "inPoint": 0.0,
+                                "outPoint": 120.0,
+                                "speed": 1.0,
+                                "linkId": "l1",
+                            }
+                        ],
+                    },
+                ],
+            }
+            music = {
+                "source_path": "C:/v/gp.mp4",
+                "proposed_mute_windows": [{"start": 10.0, "end": 22.0, "duration": 12.0}],
+                "silent_audio_windows": [{"start": 45.0, "end": 60.0, "duration": 15.0, "kind": "no_audio"}],
+                "no_music_windows": [
+                    {"start": 65.0, "end": 78.0, "duration": 13.0, "kind": "quiet_no_music"},
+                    {"start": 80.0, "end": 100.0, "duration": 20.0, "kind": "quiet_no_music"},
+                ],
+            }
+            fill_assets = {
+                "tracks": [
+                    {
+                        "id": "ftu-nd",
+                        "title": "Night Drive",
+                        "artist": "Walen",
+                        "attribution": "Night Drive by Walen (freetouse.com)",
+                        "license_url": "https://freetouse.com/license",
+                        "dur": 137.5,
+                        "volume": 0.32,
+                        "mood": "driving",
+                    },
+                    {
+                        "id": "ftu-ms",
+                        "title": "Mellow Sky",
+                        "artist": "Zambolino",
+                        "attribution": "Mellow Sky by Zambolino (freetouse.com)",
+                        "license_url": "https://freetouse.com/license",
+                        "dur": 157.0,
+                        "volume": 0.30,
+                        "mood": "cinematic chill",
+                    },
+                ]
+            }
+            no_music_ranges = [[80.0, 95.0]]
+            (tdp / "insp.json").write_text(json.dumps(insp), encoding="utf-8")
+            (tdp / "music.json").write_text(json.dumps(music), encoding="utf-8")
+            (tdp / "fill.json").write_text(json.dumps(fill_assets), encoding="utf-8")
+            (tdp / "nm.json").write_text(json.dumps(no_music_ranges), encoding="utf-8")
+            out_dir = tdp / "plan"
+            rc = cli.main(
+                [
+                    "plan-youtube",
+                    "--stage",
+                    "post-cuts",
+                    "--inspect-file",
+                    str(tdp / "insp.json"),
+                    "--music-file",
+                    str(tdp / "music.json"),
+                    "--fill-assets-file",
+                    str(tdp / "fill.json"),
+                    "--cinematic-no-music-ranges",
+                    str(tdp / "nm.json"),
+                    "--out-dir",
+                    str(out_dir),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            meta = json.loads((out_dir / "music_fill_metadata.json").read_text(encoding="utf-8"))
+            segs = meta["music_fill_segments"]
+            by_role = {s["role"]: s for s in segs}
+            self.assertIn("copyright_mute", by_role)
+            self.assertIn("silent_cinematic", by_role)
+            self.assertIn("no_music", by_role)
+            # Ordinary non-cinematic gameplay (65..78 and 95..100) must stay un-scored by default
+            self.assertAlmostEqual(by_role["no_music"]["tl_start"], 80.0)
+            self.assertAlmostEqual(by_role["no_music"]["tl_end"], 95.0)
+            self.assertFalse(any(abs(s["tl_start"] - 65.0) < 0.5 for s in segs))
+            self.assertNotEqual(by_role["copyright_mute"]["track_id"], by_role["silent_cinematic"]["track_id"])
+            self.assertNotEqual(by_role["copyright_mute"]["track_id"], by_role["no_music"]["track_id"])
+            self.assertTrue(by_role["silent_cinematic"]["driving_duck"])
+            self.assertTrue(by_role["no_music"]["driving_duck"])
+            cr = (out_dir / "youtube_credits.txt").read_text(encoding="utf-8")
+            self.assertIn("Night Drive by Walen", cr)
+            self.assertIn("Mellow Sky by Zambolino", cr)
+
     def test_plan_youtube_two_stage_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)

@@ -857,15 +857,27 @@ def classify_music_segments(
     min_mute_sec: float = 2.0,
     gap_merge_sec: float = 3.0,
     speech_pad_sec: float = 0.5,
+    rms_db_scores: Sequence[float] | None = None,
+    silence_db_thresh: float = -52.0,
+    min_silent_sec: float = 3.0,
+    min_no_music_sec: float = 10.0,
 ) -> dict[str, Any]:
-    """Classify YAMNet frame scores into music, speech, mute, and ambiguous review windows."""
+    """Classify YAMNet frame scores into music, speech, mute, silent, no-music, and review windows."""
     if not times:
         return {
             "music_windows": [],
             "speech_windows": [],
             "proposed_mute_windows": [],
             "review_windows": [],
-            "stats": {"music_seconds": 0.0, "mute_seconds": 0.0, "review_seconds": 0.0},
+            "silent_audio_windows": [],
+            "no_music_windows": [],
+            "stats": {
+                "music_seconds": 0.0,
+                "mute_seconds": 0.0,
+                "review_seconds": 0.0,
+                "silent_seconds": 0.0,
+                "no_music_seconds": 0.0,
+            },
         }
 
     mu_s = smooth_median(music_scores, radius=3)
@@ -921,6 +933,59 @@ def classify_music_segments(
     mute_tuples = subtract_intervals(high_conf_music, padded_dia, min_len=min_mute_sec)
     review_tuples = subtract_intervals(ambiguous_music, padded_dia, min_len=min_mute_sec)
 
+    silent_tuples: list[tuple[float, float]] = []
+    if rms_db_scores is not None and len(rms_db_scores) == len(times):
+        rms_s = smooth_median(rms_db_scores, radius=1)
+        silent_flags = [
+            rms_s[i] <= silence_db_thresh and sp_s[i] < speech_thresh and mu_s[i] < music_thresh
+            for i in range(len(times))
+        ]
+        silent_tuples = [
+            (round(a, 3), round(b, 3))
+            for a, b in merge_intervals(flags_to_intervals(silent_flags, times, YAMNET_HOP_SEC), max_gap=1.0)
+            if b - a >= min_silent_sec
+        ]
+
+    # Spans with neither music nor singing (excluding confirmed music and silent windows)
+    no_music_flags = [mu_s[i] < music_thresh and si_s[i] < sing_thresh for i in range(len(times))]
+    raw_no_music = merge_intervals(flags_to_intervals(no_music_flags, times, YAMNET_HOP_SEC), max_gap=1.5)
+    excluded_for_no_music = [(w["start"], w["end"]) for w in music_windows] + silent_tuples
+    no_music_tuples = subtract_intervals(raw_no_music, excluded_for_no_music, min_len=min_no_music_sec)
+
+    silent_audio_windows: list[dict[str, Any]] = []
+    for a, b in silent_tuples:
+        idxs = [i for i, t in enumerate(times) if a <= t <= b]
+        avg_db = sum(rms_db_scores[i] for i in idxs) / max(1, len(idxs)) if rms_db_scores is not None else -90.0
+        silent_audio_windows.append(
+            {
+                "start": a,
+                "end": b,
+                "duration": round(b - a, 3),
+                "avg_db": round(avg_db, 2),
+                "kind": "no_audio",
+            }
+        )
+
+    no_music_windows: list[dict[str, Any]] = []
+    for a, b in no_music_tuples:
+        idxs = [i for i, t in enumerate(times) if a <= t <= b]
+        avg_sp = sum(speech_scores[i] for i in idxs) / max(1, len(idxs))
+        avg_db = (
+            sum(rms_db_scores[i] for i in idxs) / max(1, len(idxs))
+            if rms_db_scores is not None and len(rms_db_scores) == len(times)
+            else None
+        )
+        entry: dict[str, Any] = {
+            "start": a,
+            "end": b,
+            "duration": round(b - a, 3),
+            "avg_speech": round(avg_sp, 3),
+            "kind": "quiet_no_music" if avg_sp < 0.22 else "no_music",
+        }
+        if avg_db is not None:
+            entry["avg_db"] = round(avg_db, 2)
+        no_music_windows.append(entry)
+
     proposed_mute = [
         {"start": a, "end": b, "duration": round(b - a, 3)} for a, b in mute_tuples
     ]
@@ -940,16 +1005,20 @@ def classify_music_segments(
         "speech_windows": speech_windows,
         "proposed_mute_windows": proposed_mute,
         "review_windows": review_windows,
+        "silent_audio_windows": silent_audio_windows,
+        "no_music_windows": no_music_windows,
         "stats": {
             "music_seconds": round(sum(w["duration"] for w in music_windows), 2),
             "mute_seconds": round(sum(w["duration"] for w in proposed_mute), 2),
             "review_seconds": round(sum(w["duration"] for w in review_windows), 2),
+            "silent_seconds": round(sum(w["duration"] for w in silent_audio_windows), 2),
+            "no_music_seconds": round(sum(w["duration"] for w in no_music_windows), 2),
         },
     }
 
 
 def cmd_detect_music(args: argparse.Namespace) -> int:
-    """Extract 16kHz audio and run YAMNet classification to find music vs dialogue windows."""
+    """Extract 16kHz audio and run YAMNet classification to find music, silence, and no-music windows."""
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
     import numpy as np
@@ -986,10 +1055,12 @@ def cmd_detect_music(args: argparse.Namespace) -> int:
 
         wav = np.fromfile(str(f32_path), dtype=np.float32)
         chunk_samples = max(YAMNET_SR, int(args.chunk_sec * YAMNET_SR))
+        hop_samples = int(round(YAMNET_HOP_SEC * YAMNET_SR))
         times: list[float] = []
         sp_vals: list[float] = []
         mu_vals: list[float] = []
         si_vals: list[float] = []
+        rms_db_vals: list[float] = []
 
         for c0 in range(0, len(wav), chunk_samples):
             seg = wav[c0 : c0 + chunk_samples]
@@ -1002,6 +1073,11 @@ def cmd_detect_music(args: argparse.Namespace) -> int:
                 sp_vals.append(float(arr[i, speech_idx].max()))
                 mu_vals.append(float(arr[i, music_idx]))
                 si_vals.append(float(arr[i, sing_idx].max()))
+                h0 = min(len(seg), i * hop_samples)
+                h1 = min(len(seg), h0 + hop_samples)
+                sub_seg = seg[h0:h1]
+                rms = float(np.sqrt(np.mean(sub_seg * sub_seg) + 1e-12)) if len(sub_seg) > 0 else 1e-6
+                rms_db_vals.append(round(20.0 * math.log10(rms), 2))
 
         classified = classify_music_segments(
             times=times,
@@ -1015,6 +1091,10 @@ def cmd_detect_music(args: argparse.Namespace) -> int:
             min_mute_sec=args.min_mute_sec,
             gap_merge_sec=args.gap_merge_sec,
             speech_pad_sec=args.speech_pad_sec,
+            rms_db_scores=rms_db_vals,
+            silence_db_thresh=args.silence_db_thresh,
+            min_silent_sec=args.min_silent_sec,
+            min_no_music_sec=args.min_no_music_sec,
         )
         payload = {
             "ok": True,
@@ -1027,6 +1107,8 @@ def cmd_detect_music(args: argparse.Namespace) -> int:
         print(
             f"[detect-music] music_wins={len(classified['music_windows'])} "
             f"mute_wins={len(classified['proposed_mute_windows'])} "
+            f"silent_wins={len(classified['silent_audio_windows'])} "
+            f"no_music_wins={len(classified['no_music_windows'])} "
             f"review={len(classified['review_windows'])} -> {args.output}"
         )
         return 0
@@ -1340,14 +1422,53 @@ def _pick_fill_track(
     fill_tracks: Sequence[dict[str, Any]],
     gap_start: float,
     gap_dur: float,
-    hint_mood: str | None = None,
+    hint_mood: str | Sequence[str] | None = None,
     idx_hint: int = 0,
+    exclude_ids: set[str] | None = None,
 ) -> dict[str, Any]:
+    """Select a Free To Use track matching hint_mood while optionally avoiding excluded track IDs."""
+    pool = [tr for tr in fill_tracks if str(tr.get("id", "")) not in (exclude_ids or set())]
+    if not pool:
+        pool = list(fill_tracks)
     if hint_mood:
-        for tr in fill_tracks:
-            if hint_mood.lower() in str(tr.get("mood", "")).lower():
-                return tr
-    return fill_tracks[idx_hint % len(fill_tracks)]
+        moods = [hint_mood.lower()] if isinstance(hint_mood, str) else [m.lower() for m in hint_mood if m]
+        for kw in moods:
+            for tr in pool:
+                if kw in str(tr.get("mood", "")).lower():
+                    return tr
+    return pool[idx_hint % len(pool)]
+
+
+def _map_source_ranges_to_tl(
+    vclips: Sequence[dict[str, Any]],
+    docs: Sequence[dict[str, Any]],
+    key_name: str,
+    min_len: float = 2.0,
+) -> list[tuple[float, float]]:
+    """Map source-time intervals from analysis manifests onto surviving post-cut timeline bounds."""
+    out: list[tuple[float, float]] = []
+    for clip in vclips:
+        in_pt, out_pt = float(clip["inPoint"]), float(clip["outPoint"])
+        for doc in docs:
+            if not _clip_matches_source(clip, doc):
+                continue
+            for win in doc.get(key_name, []):
+                ma, mb = float(win["start"]), float(win["end"])
+                oa, ob = max(ma, in_pt), min(mb, out_pt)
+                if ob - oa >= min_len:
+                    out.append((round(_src_to_tl(clip, oa), 3), round(_src_to_tl(clip, ob), 3)))
+    return out
+
+
+def _parse_timeline_ranges(raw_data: Any) -> list[tuple[float, float]]:
+    raw_items = raw_data.get("ranges", raw_data) if isinstance(raw_data, dict) else raw_data
+    out: list[tuple[float, float]] = []
+    for item in raw_items or []:
+        if isinstance(item, dict) and "start" in item and "end" in item:
+            out.append((float(item["start"]), float(item["end"])))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            out.append((float(item[0]), float(item[1])))
+    return out
 
 
 def _collect_timeline_speech_segments(
@@ -1671,7 +1792,6 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
     music_list = _load_manifest_by_asset(args.music_file)
     transcript_list = _load_manifest_by_asset(args.transcript_file)
     fill_assets_raw = read_json_auto(args.fill_assets_file) if args.fill_assets_file else {}
-    driving_raw = read_json_auto(args.driving_ranges_file) if args.driving_ranges_file else []
 
     video_tracks = [t for t in inspect_data.get("tracks", []) if t.get("type") == "video"]
     primary_vtrack = video_tracks[0] if video_tracks else {"items": [], "i": 0}
@@ -1923,16 +2043,20 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
         for bm in bookmarks_added:
             ops_2.append({"tool": "add_bookmark", "args": {"at": bm["at"], "label": bm["label"]}})
 
-        # 3. Free To Use Music Fill (Audio 3) & Driving Auto-Ducking + SFX (Audio 4)
-        driving_tl: list[tuple[float, float]] = []
-        raw_drv = driving_raw.get("ranges", driving_raw) if isinstance(driving_raw, dict) else driving_raw
-        for dr in raw_drv or []:
-            if isinstance(dr, dict) and "start" in dr and "end" in dr:
-                driving_tl.append((float(dr["start"]), float(dr["end"])))
-            elif isinstance(dr, (list, tuple)) and len(dr) >= 2:
-                driving_tl.append((float(dr[0]), float(dr[1])))
+        # 3. Free To Use Music Fill (Audio 3): copyright mutes, driving & silent/no-music cinematics + SFX
+        driving_raw = read_json_auto(args.driving_ranges_file) if args.driving_ranges_file else []
+        no_music_raw = (
+            read_json_auto(args.no_music_ranges_file)
+            if getattr(args, "no_music_ranges_file", None)
+            else []
+        )
+        driving_tl = _parse_timeline_ranges(driving_raw)
+        silent_tl = _map_source_ranges_to_tl(vclips, music_list, "silent_audio_windows", min_len=2.5)
+        no_music_tl = _parse_timeline_ranges(no_music_raw)
+        if getattr(args, "fill_no_music", False):
+            no_music_tl.extend(_map_source_ranges_to_tl(vclips, music_list, "no_music_windows", min_len=8.0))
 
-        if fill_tracks and (muted_tl_intervals or driving_tl):
+        if fill_tracks and (muted_tl_intervals or driving_tl or silent_tl or no_music_tl):
             existing_tracks = inspect_data.get("tracks", [])
             audio3_idx = len(existing_tracks)
             for tr in existing_tracks:
@@ -1941,11 +2065,19 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
                     break
 
             muted_merged = merge_intervals(muted_tl_intervals, max_gap=0.4)
-            driving_only = subtract_intervals(merge_intervals(driving_tl, max_gap=1.0), muted_merged, min_len=3.0)
-            all_fills: list[tuple[float, float, bool]] = [(a, b, False) for a, b in muted_merged] + [
-                (a, b, True) for a, b in driving_only
-            ]
-            all_fills.sort(key=lambda x: x[0])
+            covered: list[tuple[float, float]] = list(muted_merged)
+            driving_only = subtract_intervals(merge_intervals(driving_tl, max_gap=1.0), covered, min_len=3.0)
+            covered.extend(driving_only)
+            silent_only = subtract_intervals(merge_intervals(silent_tl, max_gap=0.8), covered, min_len=2.5)
+            covered.extend(silent_only)
+            no_music_only = subtract_intervals(merge_intervals(no_music_tl, max_gap=1.0), covered, min_len=4.0)
+
+            primary_fills: list[tuple[float, float, str, bool]] = [
+                (a, b, "copyright_mute", False) for a, b in muted_merged
+            ] + [(a, b, "driving", True) for a, b in driving_only]
+            secondary_fills: list[tuple[float, float, str, bool]] = [
+                (a, b, "silent_cinematic", True) for a, b in silent_only
+            ] + [(a, b, "no_music", True) for a, b in no_music_only]
 
             track_cursor: dict[str, float] = {}
             need_new_track = audio3_idx >= len(existing_tracks)
@@ -1960,60 +2092,87 @@ def cmd_plan_youtube(args: argparse.Namespace) -> int:
             extra_audio_tracks = (1 if need_new_track else 0) + (1 if (sfx_whoosh and time_jump_cuts) else 0)
             dialogue_track_post = base_dialogue_track + extra_audio_tracks
 
-            for seg_idx, (a, b, is_driving) in enumerate(all_fills):
-                rem_start, rem_end = a, b
-                while rem_end - rem_start >= 1.5:
-                    tr_meta = _pick_fill_track(
-                        fill_tracks,
-                        rem_start,
-                        rem_end - rem_start,
-                        hint_mood="driving" if is_driving else None,
-                        idx_hint=seg_idx,
-                    )
-                    tid = tr_meta["id"]
-                    tdur = float(tr_meta.get("dur", 150.0))
-                    cursor = track_cursor.get(tid, 4.0)
-                    if cursor >= tdur - 4.0:
-                        cursor = 4.0
-                    avail = tdur - cursor
-                    piece_dur = min(rem_end - rem_start, avail)
-                    piece_end = round(rem_start + piece_dur, 3)
-                    s_in = round(cursor, 3)
-                    s_out = round(cursor + piece_dur, 3)
-                    track_cursor[tid] = s_out
+            primary_track_ids: set[str] = set()
+            planned_clips: list[tuple[float, float, str, bool, dict[str, Any], float, float]] = []
 
-                    used_tracks[tid] = tr_meta
-                    music_fill_segments.append(
-                        {
-                            "tl_start": round(rem_start, 3),
-                            "tl_end": piece_end,
-                            "track_title": tr_meta.get("title", tid),
+            def _schedule_fill_group(
+                fills: Sequence[tuple[float, float, str, bool]],
+                moods: Sequence[str] | str | None,
+                exclude: set[str] | None,
+                record_primary: bool,
+            ) -> None:
+                for seg_idx, (a, b, role, should_duck) in enumerate(fills):
+                    rem_start, rem_end = a, b
+                    while rem_end - rem_start >= 1.5:
+                        tr_meta = _pick_fill_track(
+                            fill_tracks,
+                            rem_start,
+                            rem_end - rem_start,
+                            hint_mood=moods if role != "copyright_mute" else None,
+                            idx_hint=seg_idx,
+                            exclude_ids=exclude,
+                        )
+                        tid = str(tr_meta["id"])
+                        if record_primary:
+                            primary_track_ids.add(tid)
+                        tdur = float(tr_meta.get("dur", 150.0))
+                        cursor = track_cursor.get(tid, 4.0)
+                        if cursor >= tdur - 4.0:
+                            cursor = 4.0
+                        avail = tdur - cursor
+                        piece_dur = min(rem_end - rem_start, avail)
+                        piece_end = round(rem_start + piece_dur, 3)
+                        s_in = round(cursor, 3)
+                        s_out = round(cursor + piece_dur, 3)
+                        track_cursor[tid] = s_out
+                        used_tracks[tid] = tr_meta
+                        planned_clips.append((round(rem_start, 3), piece_end, role, should_duck, tr_meta, s_in, s_out))
+                        rem_start = piece_end
+
+            _schedule_fill_group(primary_fills, "driving", None, True)
+            _schedule_fill_group(
+                secondary_fills,
+                ("cinematic", "ambient", "underscore", "chill", "relaxed", "interior"),
+                primary_track_ids,
+                False,
+            )
+
+            planned_clips.sort(key=lambda item: item[0])
+            for tl_a, tl_b, role, should_duck, tr_meta, s_in, s_out in planned_clips:
+                tid = str(tr_meta["id"])
+                music_fill_segments.append(
+                    {
+                        "tl_start": tl_a,
+                        "tl_end": tl_b,
+                        "track_id": tid,
+                        "track_title": tr_meta.get("title", tid),
+                        "role": role,
+                        "in": s_in,
+                        "out": s_out,
+                        "volume": float(tr_meta.get("volume", 0.30)),
+                        "driving_duck": should_duck,
+                    }
+                )
+                ops_3.append(
+                    {
+                        "tool": "insert_clip",
+                        "args": {
+                            "asset": tid,
+                            "track": target_music_track,
+                            "at": tl_a,
                             "in": s_in,
                             "out": s_out,
-                            "volume": float(tr_meta.get("volume", 0.30)),
-                            "driving_duck": is_driving,
-                        }
-                    )
-                    ops_3.append(
-                        {
-                            "tool": "insert_clip",
-                            "args": {
-                                "asset": tid,
-                                "track": target_music_track,
-                                "at": round(rem_start, 3),
-                                "in": s_in,
-                                "out": s_out,
-                                "ripple": False,
-                            },
-                        }
-                    )
-                    rem_start = piece_end
+                            "ripple": False,
+                        },
+                    }
+                )
 
             ops_3_notes = {
                 "post_insert_instructions": (
                     "After executing batch_3_music_sfx.json, read done[].result.id from the apply output "
                     "and apply set_volume, set_fade (in/out ~0.25s), set_fade_curve (equalPower/both), "
-                    f"and duck_under (over_track={dialogue_track_post}, amount=0.25) on driving segments."
+                    f"and duck_under (over_track={dialogue_track_post}, amount=0.25) on driving_duck=true segments "
+                    "(driving, silent_cinematic, and no_music)."
                 ),
                 "music_fill_segments": music_fill_segments,
             }
@@ -3247,6 +3406,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_dm.add_argument("--min-mute-sec", type=float, default=2.0)
     p_dm.add_argument("--gap-merge-sec", type=float, default=3.0)
     p_dm.add_argument("--speech-pad-sec", type=float, default=0.5)
+    p_dm.add_argument("--silence-db-thresh", type=float, default=-52.0)
+    p_dm.add_argument("--min-silent-sec", type=float, default=3.0)
+    p_dm.add_argument("--min-no-music-sec", type=float, default=10.0)
     p_dm.add_argument("--chunk-sec", type=int, default=600)
     p_dm.add_argument("--keep-f32", help="Save 16kHz mono float32 PCM here for reuse by transcribe")
     p_dm.add_argument("--output", required=True, help="Output JSON path")
@@ -3277,6 +3439,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_py.add_argument("--transcript-file", help="transcribe JSON or manifest list")
     p_py.add_argument("--fill-assets-file", help="JSON with Free To Use tracks and optional whoosh SFX")
     p_py.add_argument("--driving-ranges-file", help="JSON with timeline [start, end] driving spans")
+    p_py.add_argument(
+        "--cinematic-no-music-ranges",
+        "--no-music-ranges-file",
+        dest="no_music_ranges_file",
+        help="JSON with timeline [start, end] spans for cinematics/cutscenes lacking music (ordinary gameplay stays un-scored)",
+    )
+    p_py.add_argument(
+        "--fill-no-music",
+        action="store_true",
+        help="Opt-in only: also auto-fill raw no_music_windows from music-file (omitted by default so ordinary gameplay remains without music)",
+    )
     p_py.add_argument("--game", help="Game title for YouTube credits and Ficha Técnica")
     p_py.add_argument("--creator", help="Optional original streamer/VOD channel credit")
     p_py.add_argument("--min-chapter-sec", type=float, default=45.0, help="Minimum chapter spacing in seconds (clamped >= 10s)")

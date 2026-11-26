@@ -4,8 +4,7 @@ description: >-
   Senior AI gameplay editor & viral clipper for CutWire Drift MCP (and
   transcript-first pre-edit planning). Handles two modes: (1) Long YouTube
   16:9 gameplay (technical breakdown, optional 0:00-0:15 cold open teaser,
-  pause/dead-screen cuts and jump-cut pacing, copyright-radio muting
-  preserving dialogue, Free-To-Use music fill + driving ducking, bookmarks, and
+  playback/narration, Free-To-Use music fill + driving/cinematic auto-ducking, bookmarks, and
   mandatory SEO/CTR YouTube chapters + copy-pasteable credits), and (2) Vertical 9:16 Reels/TikTok/Shorts
   (60-90s narrative highlights by default or 30-60s micro-clips, Hook -> Setup
   -> Climax -> Payoff, clean 9:16 gameplay/facecam framing, subtle Reel-entry
@@ -75,7 +74,7 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
 
 ### Step 3: Detect Copyright Music & Preserve Dialogue
 
-1. Extract 16 kHz mono audio (`--keep-f32` to avoid duplicate extraction) and classify speech/music/singing via YAMNet:
+1. Extract 16 kHz mono audio (`--keep-f32` to avoid duplicate extraction) and classify speech, music, singing, silent/muted-audio (`silent_audio_windows`), and music-less (`no_music_windows`) segments via YAMNet + frame RMS:
    ```powershell
    uv run ./scripts/drift_gameplay_cli.py detect-music --video "<video_path>" --keep-f32 ./out/audio_v1.f32 --output ./out/music_v1.json
    ```
@@ -87,13 +86,14 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
 
    - On CUDA GPUs, `--model large-v3-turbo` improves proper-noun accuracy; if model download/VRAM fails, rerun with `--model base --device cpu`.
 
-3. Inspect ambiguous song edges or instrumental segments (`frames` / `capture` to check in-game radio/cutscene context). Never mute confirmed dialogue or safe original game score; queue uncertain cases for `add_bookmark` and `edit_report.md`.
+3. Inspect ambiguous song edges, instrumental segments, and `silent_audio_windows` / `no_music_windows` (`frames` / `capture` / `audio_measure`) to separate pause screens (cut in Stage 1) from **cutscenes/cinematics** that have **no audio** (e.g., copyright-muted cutscenes -> `silent_audio_windows`) or **no music** (curated cinematic spans in `--no-music-ranges-file`). **Never** mute confirmed dialogue or safe original game score, and **leave ordinary non-cinematic / non-driving gameplay without added music** even when it has no background track (`quiet_no_music` exploration/combat/free-roam stays natural). Queue uncertain cases for `add_bookmark` and `edit_report.md`.
 
 ### Step 4: Source Free To Use Music & Subtle SFX (Zero Quota)
 
 1. Check `list_assets` in `inspect` first to reuse any tracks/SFX already in the bin.
 2. Search/install **only** from `stock.music` (`provider: "freetouse"`, `quota: null`) and `sfx` (`quota: null`, e.g. subtle `motion/whoosh` only for real time-jump cuts). **Never** spend `stock.audio` or `stock.video` quotas.
-3. Call `market_item` for each selected track to obtain exact `license.attribution` (`Title by Artist (freetouse.com)`) and `license.url`, install with `market_install({"source":"stock.music","id":...,"wait":120})`, and save track metadata (`id`, `title`, `artist`, `attribution`, `license_url`, `dur`, `volume`, `mood`) into `fill_assets.json`. Target `~ -22..-24 LUFS` for background music under `~ -14 LUFS` dialogue/gameplay.
+   - **Strict scope + distinct track rule:** Only add Free To Use music over **(a)** verified copyright-muted radio/music spans, **(b)** driving/transit moments without in-game radio, and **(c)** **cinematics/cutscenes with no audio or no music**. Leave all other gameplay stretches naturally without added BGM. When both driving/copyright fills and silent/music-less cinematics exist, source **at least two different Free To Use tracks** with complementary moods (e.g., upbeat/driving for radio/driving + a **different** atmospheric/cinematic Free To Use track for silent or music-less cinematics).
+3. Call `market_item` for each selected track to obtain exact `license.attribution` (`Title by Artist (freetouse.com)`) and `license.url`, install with `market_install({"source":"stock.music","id":...,"wait":120})`, and save track metadata (`id`, `title`, `artist`, `attribution`, `license_url`, `dur`, `volume`, `mood`) into `fill_assets.json`. Target `~ -22..-24 LUFS` for background music (`~ -23..-25 LUFS` for cinematic/underscore fills) under `~ -14 LUFS` dialogue/gameplay.
 4. If **no** external Free To Use music tracks are added (e.g., original in-game score/commentary only), still record the **Game** title, any **Gameplay / VOD Source** channel credit (per creator permission rules), and any Drift SFX used so `youtube_credits.txt` is always complete.
 
 ### Step 5: Plan & Apply in Phased Batches (`dry_run` First)
@@ -109,12 +109,12 @@ Inspect `inspect_initial.json` and confirm the workflow mode with the user (or f
    ```
    Dry-run then apply `batch_1b_delete_cuts.json`.
 3. **Re-inspect:** Capture post-cut timeline state `./out/inspect_post_cuts.json`.
-4. **Stage 2 (`post-cuts`):** Generate subtle time-jump transitions (`crossfade`/`dip`, `0.25–0.35 s`), monotonic `set_keyframes` volume mutes (`0.15 s` linear ramps), `Audio 3` Free To Use fills (both muted gaps and driving-without-radio ranges with `duck_under`), `Audio 4` subtle time-jump `whoosh` SFX, review `add_bookmark` markers (including optional `0:00–0:15` Cold Open teaser hook and jump-cut notes for slow pacing stretches), plus `youtube_credits.txt`, SEO/CTR-oriented `chapters.txt` (`00:00` / `MM:SS` / `H:MM:SS`), and `edit_report.md`:
+4. **Stage 2 (`post-cuts`):** Generate subtle time-jump transitions (`crossfade`/`dip`, `0.25–0.35 s`), monotonic `set_keyframes` volume mutes (`0.15 s` linear ramps), `Audio 3` Free To Use fills (**strictly** copyright-muted radio gaps + driving-without-radio spans + **cinematics/cutscenes lacking audio or music** using a **different** FTU track with `equalPower` fades and speech ducking — leaving normal non-cinematic gameplay without music), `Audio 4` subtle time-jump `whoosh` SFX, review `add_bookmark` markers (including optional `0:00–0:15` Cold Open teaser hook and jump-cut notes for slow pacing stretches), plus `youtube_credits.txt`, SEO/CTR-oriented `chapters.txt` (`00:00` / `MM:SS` / `H:MM:SS`), and `edit_report.md`:
    ```powershell
-   uv run ./scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post_cuts.json --pauses-file ./out/pauses_manifest.json --music-file ./out/music_manifest.json --transcript-file ./out/transcript_manifest.json --fill-assets-file ./out/fill_assets.json --driving-ranges-file ./out/driving_ranges.json --game "<Game Title>" --out-dir ./out/plan
+   uv run ./scripts/drift_gameplay_cli.py plan-youtube --stage post-cuts --inspect-file ./out/inspect_post_cuts.json --pauses-file ./out/pauses_manifest.json --music-file ./out/music_manifest.json --transcript-file ./out/transcript_manifest.json --fill-assets-file ./out/fill_assets.json --driving-ranges-file ./out/driving_ranges.json --cinematic-no-music-ranges ./out/cinematic_no_music_ranges.json --game "<Game Title>" --out-dir ./out/plan
    ```
    Dry-run and apply `batch_2_transitions_mutes.json` and `batch_3_music_sfx.json` in separate undo steps.
-   _(Pass full transcript JSON to `--transcript-file` whenever available so chapter generation sees all narrative milestones, not only music windows.)_
+   _(Pass full transcript JSON to `--transcript-file` whenever available so chapter generation sees all narrative milestones, not only music windows. `--no-music-ranges-file` is an alias for `--cinematic-no-music-ranges` and should contain **only** cinematics/cutscenes lacking music — omit `--fill-no-music` by default so ordinary gameplay stays without background music.)_
 5. **Verify & Finalize Mandatory Chapters + Credits:**
    - Run `audio_measure` across muted gaps, dialogue transitions, and ducked driving sections (`~ -14 LUFS` master / `~ -22..-24 LUFS` BGM, zero clipping) and inspect visual seams with `frames`.
    - **If `plan-youtube --stage post-cuts` was not run** (e.g., manual Drift edits, zero pause cuts/mutes needed, or Transcript-Only Fallback), generate `chapters.txt`, `youtube_credits.txt`, and `edit_report.md` via:

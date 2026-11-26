@@ -109,7 +109,7 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
   - Use `0.15 s` linear ramps (`a - 0.15 -> a`, `b -> b + 0.15`) to avoid clicks.
   - Never mute speech/dialogue or confirmed safe game score. For uncertain instrumental tracks, leave unmuted, place `add_bookmark`, and document in `edit_report.md`.
 
-### 2.6 Free To Use Music Fill & Driving Auto-Ducking
+### 2.6 Free To Use Music Fill, Driving Auto-Ducking & Silent/No-Music Cinematics
 
 - **Marketplace rules:**
   - Use **only** `stock.music` (`provider: "freetouse"`, `quota: null`) and `sfx` (`quota: null`).
@@ -119,9 +119,17 @@ Given a Drift clip object (`start`, `inPoint`, `outPoint`, `speed`, default `spe
   |---|---|---|---|---|---|
   | `Night Drive` | Walen | `ZnJlZXRvdXNlOm11c2ljOjQ3MmZjOTk1LWQzZDEtMDQzNC1hZWRlLWI1NzBhZjM3N2E4Zg` | `137.507 s` | Night driving / synth chill | `0.32` |
   | `Road Trip` | HiLau | `ZnJlZXRvdXNlOm11c2ljOjEyNWUyNTc5LWRmZDEtNDk4Yy1iYjEyLWUwMmRkM2MwY2ZlNA` | `188.917 s` | Daytime driving / upbeat | `0.26` |
-  | `Mellow Sky` | Zambolino | `ZnJlZXRvdXNlOm11c2ljOmNjYzdlZGZjLTMwNzUtNDBkZi05OGIxLTZjNjM4MjY2NWMzOA` | `157.060 s` | Interiors / relaxed / chill | `0.34` |
+  | `Mellow Sky` | Zambolino | `ZnJlZXRvdXNlOm11c2ljOmNjYzdlZGZjLTMwNzUtNDBkZi05OGIxLTZjNjM4MjY2NWMzOA` | `157.060 s` | Interiors / cinematic / chill | `0.34` |
   | `Night Hawk` | HiLau | `ZnJlZXRvdXNlOm11c2ljOmI2MWM3YmE3LWJhMTQtNGVlNC1iMGRjLTJlMmU1YTMyNjU0Yw` | `188.865 s` | Car radio / night cruise | `0.26` |
 - Always run `market_item({"source": "stock.music", "id": "<id>"})` when adding new tracks to collect exact `license.attribution` and `license.url` for `youtube_credits.txt`, and check loudness via `audio_measure` / `normalize_volume({"clip": ..., "target_lufs": -23})`.
+- **Strict Music Scope & Silent / Music-Less Cinematics (Different Track Rule):**
+  - **Only add Free To Use music (`Audio 3`) in:**
+    1. **Driving / vehicle transit stretches** lacking in-game radio (`driving_ranges`),
+    2. **Verified copyright-muted radio/music intervals** (`proposed_mute_windows`), and
+    3. **Cinematics / cutscenes lacking audio or music** (`silent_audio_windows` verified to be cutscenes/cinematics, or curated `--cinematic-no-music-ranges` / `--no-music-ranges-file` containing strictly music-less cutscenes).
+  - **Leave regular non-cinematic gameplay untouched without added music:** do **not** fill ordinary free-roam, walking, exploration, combat, or menu/inventory gameplay stretches (`quiet_no_music`) even when the game has no background score (omit `--fill-no-music` unless the user explicitly asks to underscore the whole gameplay).
+  - For **silent or music-less cinematics**, pick a **different** Free To Use track (`exclude_ids` avoiding the primary radio/driving track; e.g., `Mellow Sky` or another atmospheric/cinematic track distinct from `Night Drive`/`Road Trip`). Keep underscore loudness controlled (`~ -23..-25 LUFS`), apply `equalPower` fades (`in: 0.25–0.35 s, out: 0.25–0.35 s`), and apply smooth dialogue ducking (`duck_under` over true speech or `set_keyframes` `interpolation: "smooth"` aligned to Whisper word timestamps so ambient sound/waves never pump music).
+  - Ensure every distinct track placed is recorded in `fill_assets.json` and credited in `youtube_credits.txt`.
 - **Placement rules (`Audio 3`):**
   - Place first clip with `place_clip({"asset": "<id>", "track": 3, "at": <t>, "new_track": true})` (or on an existing `Audio 3` track), then `insert_clip({"asset": ..., "track": <idx>, "at": <t>, "in": <s_in>, "out": <s_out>, "ripple": false})` for subsequent gaps.
   - Advance `s_in` continuously across short dialogue interruptions within the same scene so the track flows instead of restarting from `0.0 s`.

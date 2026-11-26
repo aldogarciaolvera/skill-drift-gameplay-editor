@@ -8,7 +8,7 @@ Soporta dos modos de edición:
    - Detecta y recorta menús de pausa, pantallas de carga/escritorio y mapas largos manteniendo el audio/video sincronizado (`ripple: true`).
    - Aplica transiciones sutiles (`crossfade` / `dip`) y SFX `whoosh` en saltos temporales.
    - Detecta música con copyright mediante YAMNet + Whisper y mutea **solo** los tramos sin diálogo ni score propio del juego (`set_keyframes` en `volume`).
-   - Descarga o reutiliza música _Free To Use_ de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y rellena los espacios muteados **y tramos de conducción sin radio** (con auto-ducking `duck_under` debajo de diálogos).
+   - Descarga o reutiliza música _Free To Use_ de Drift (`quota: null`), nivela a `~ -22..-24 LUFS` y agrega música **únicamente** en espacios de radio muteados, **tramos de conducción sin radio** y **cinemáticas sin audio o sin música** (usando una pista _Free To Use_ **diferente** para cinemáticas, con auto-ducking bajo diálogos). Todo el resto del gameplay queda naturalmente sin música añadida.
    - Marca casos dudosos con `add_bookmark` y genera **siempre** `youtube_credits.txt` (créditos listos para YouTube), `chapters.txt` (capítulos SEO/CTR desde `00:00`) y `edit_report.md`, incluso en ediciones manuales, sin música externa o desde transcripción.
 
 2. **Modo B — Reels / Shorts / TikTok (`9:16` vertical, configuración canónica `ClipsParte2`):**
@@ -118,7 +118,7 @@ Si mantienes el repositorio clonado en otra carpeta (por ejemplo `C:\Users\<usua
 1. Abre **CutWire Drift** con tu proyecto cargado y obtén la **URL** y el **Token** de la sesión MCP actual.
 2. En el chat de Antigravity, pide lo que necesitas (la skill se activa automáticamente por su `description`, o puedes mencionarla por nombre `drift-gameplay-editor`):
    - **Modo A (YouTube 16:9):**
-     > "Usa `drift-gameplay-editor` para editar este gameplay largo para YouTube: recorta pausas, mutea música con copyright conservando diálogos, rellena huecos y conducción con música Free To Use y genera créditos/capítulos. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
+     > "Usa `drift-gameplay-editor` para editar este gameplay largo para YouTube: recorta pausas, mutea música con copyright conservando diálogos, agrega música Free To Use solo en conducción y cinemáticas sin música (dejando el resto del gameplay sin música) y genera capítulos y créditos. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
    - **Modo B (Reels / Shorts 9:16):**
      > "Usa `drift-gameplay-editor` en modo Reels 9:16 sobre este gameplay: saca al menos 5 clips narrativos de más de 1 minuto con encuadre vertical limpio, solo entrada sutil al Reel (sin exceso de efectos) y subtítulos en inglés y español. URL: `http://127.0.0.1:4731/mcp`, Token: `...`"
 
